@@ -1,0 +1,21 @@
+{
+  "name": "smart-house",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.10.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "predev": "pnpm --filter @smart-house/contracts build",
+    "dev": "pnpm --parallel --stream --filter @smart-house/contracts --filter @smart-house/api --filter @smart-house/web dev",
+    "build": "pnpm --recursive build",
+    "lint": "pnpm --recursive --if-present lint",
+    "pretest": "pnpm --filter @smart-house/contracts build",
+    "test": "pnpm --recursive --if-present test",
+    "test:e2e": "pnpm --filter @smart-house/api test:e2e",
+    "pretypecheck": "pnpm --filter @smart-house/contracts build",
+    "typecheck": "pnpm --recursive --if-present typecheck",
+    "format": "pnpm --recursive --if-present format"
+  }
+}

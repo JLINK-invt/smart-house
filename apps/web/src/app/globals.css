@@ -1,0 +1,280 @@
+:root {
+  --ink: #e9eadf;
+  --muted: #9ca096;
+  --surface: #151916;
+  --line: #343a34;
+  --accent: #d8ff66;
+  --danger: #ff765f;
+  --background: #0c0f0d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background:
+    linear-gradient(rgba(216, 255, 102, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(216, 255, 102, 0.025) 1px, transparent 1px),
+    var(--background);
+  background-size: 40px 40px;
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.shell {
+  width: min(1180px, calc(100% - 48px));
+  min-height: 100vh;
+  margin: 0 auto;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 88px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-weight: 700;
+}
+
+.brand-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  letter-spacing: 0;
+}
+
+.edition {
+  color: var(--muted);
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.7fr);
+  gap: 72px;
+  align-items: end;
+  padding: 112px 0 96px;
+}
+
+.eyebrow {
+  margin: 0 0 24px;
+  color: var(--accent);
+  font-family: "Courier New", monospace;
+  font-size: 0.76rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1 {
+  max-width: 760px;
+  margin: 0;
+  font-size: clamp(3.5rem, 8vw, 7.6rem);
+  font-weight: 500;
+  letter-spacing: -0.075em;
+  line-height: 0.87;
+}
+
+.intro {
+  max-width: 600px;
+  margin: 38px 0 0;
+  color: var(--muted);
+  font-size: 1.08rem;
+  line-height: 1.7;
+}
+
+.status-card {
+  border: 1px solid var(--line);
+  background: rgba(21, 25, 22, 0.86);
+}
+
+.status-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 16px currentColor;
+}
+
+.status-dot.online {
+  background: var(--accent);
+  color: var(--accent);
+}
+
+.status-dot.offline {
+  background: var(--danger);
+  color: var(--danger);
+}
+
+.status-card dl {
+  margin: 0;
+  padding: 8px 20px;
+}
+
+.status-card dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(52, 58, 52, 0.58);
+  font-family: "Courier New", monospace;
+  font-size: 0.72rem;
+}
+
+.status-card dl div:last-child {
+  border-bottom: 0;
+}
+
+.status-card dt {
+  color: var(--muted);
+}
+
+.status-card dd {
+  margin: 0;
+  text-align: right;
+}
+
+.architecture {
+  padding: 56px 0 96px;
+  border-top: 1px solid var(--line);
+}
+
+.section-label {
+  display: flex;
+  gap: 20px;
+  align-items: baseline;
+  margin-bottom: 36px;
+  font-family: "Courier New", monospace;
+}
+
+.section-label span {
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+
+.section-label h2 {
+  margin: 0;
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.layers {
+  border-top: 1px solid var(--line);
+}
+
+.layers article {
+  display: grid;
+  grid-template-columns: 60px minmax(0, 1fr) auto;
+  gap: 28px;
+  align-items: center;
+  min-height: 140px;
+  padding: 28px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.layer-index {
+  color: var(--accent);
+  font-family: "Courier New", monospace;
+  font-size: 0.76rem;
+}
+
+.layers h3 {
+  margin: 0 0 8px;
+  font-size: 1.65rem;
+  font-weight: 500;
+}
+
+.layers p {
+  max-width: 580px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.layers code,
+footer code {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  color: var(--accent);
+  font-family: "Courier New", monospace;
+  font-size: 0.72rem;
+}
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 96px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-family: "Courier New", monospace;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+@media (max-width: 760px) {
+  .shell {
+    width: min(100% - 32px, 1180px);
+  }
+
+  .edition {
+    display: none;
+  }
+
+  .hero {
+    grid-template-columns: 1fr;
+    gap: 48px;
+    padding: 72px 0;
+  }
+
+  h1 {
+    font-size: clamp(3.25rem, 16vw, 5.4rem);
+  }
+
+  .layers article {
+    grid-template-columns: 28px 1fr;
+    gap: 16px;
+  }
+
+  .layers code {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  footer {
+    gap: 24px;
+  }
+}

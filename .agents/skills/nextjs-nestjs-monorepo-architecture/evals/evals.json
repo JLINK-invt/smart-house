@@ -1,0 +1,23 @@
+{
+  "skill_name": "nextjs-nestjs-monorepo-architecture",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have a pnpm monorepo with a Next.js dashboard in apps/web and a NestJS API in apps/api. I am adding organizations, memberships, and role-based access. Should I create a shared package for the feature, let Next.js query Prisma directly for server components, or keep everything in the API? Propose the smallest folder layout, request flow, contract approach, and test plan.",
+      "expected_output": "Recommends a modular NestJS ownership boundary, keeps product data and authorization in the API, prevents direct Prisma access from Next.js, proposes narrowly justified shared contracts, and covers validation, authorization, and cross-application tests.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Our NestJS API currently returns Prisma models to a Next.js app, and developers copy DTO types into the web project. We need to add a customer email field that is initially optional but will become required after backfilling old records. Give an incremental refactor and release plan that avoids breaking existing users.",
+      "expected_output": "Separates persistence models from transport contracts, retains API-side validation, describes an additive migration and backfill sequence, and treats contract changes and compatibility as deliberate rollout work.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "A user action in our Next.js app creates an invoice through NestJS and then sends an email, generates a PDF, and reports analytics. I am the only developer. Should I add microservices, Kafka, a queue, or do it synchronously? Recommend a practical design with failure handling, observability, ownership, and deployment implications.",
+      "expected_output": "Rejects speculative distributed architecture, distinguishes request-critical and background work, introduces a simple queue only when justified, preserves API ownership, and names concrete logging, retry, and deployment trade-offs.",
+      "files": []
+    }
+  ]
+}
