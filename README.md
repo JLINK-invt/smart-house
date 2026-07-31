@@ -8,10 +8,22 @@ Monorepo para el producto Smart House, organizado como un monolito modular con d
 apps/
   web/           Next.js: interfaz y estado de presentacion
   api/           NestJS: negocio, autorizacion y acceso a datos
+  ingestion-worker/ NestJS standalone: consumo MQTT y normalizacion futura
 packages/
   contracts/     Esquemas de transporte independientes de framework
+contracts/
+  openapi/       Especificaciones HTTP versionadas
+infra/
+  local/         PostgreSQL, Redis y MQTT para desarrollo
 docs/
   architecture.md
+  adr/
+  iot/hardware-inventory.md
+  product/mvp-scope.md
+  security/threat-model.md
+  security/authorization-matrix.md
+  operations/configuration.md
+  operations/slo-baseline.md
 ```
 
 No se incluye una base de datos ni autenticacion hasta definir los primeros requisitos de producto. Cuando se agreguen, la API sera su unica propietaria.
@@ -44,3 +56,12 @@ pnpm build
 ```
 
 Los comandos se ejecutan desde la raiz para respetar el orden de dependencias del workspace.
+
+## Simulador MQTT
+
+El simulador local de `temp-001` y `relay-001` se encuentra en [`simulador/`](simulador/README.md). Para levantar su broker Mosquitto e iniciarlo:
+
+```bash
+pnpm simulator:broker:up
+pnpm simulator
+```

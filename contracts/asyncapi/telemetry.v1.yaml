@@ -1,0 +1,69 @@
+asyncapi: 3.0.0
+info:
+  title: Smart House MQTT telemetry
+  version: 1.0.0
+  description: Simulated gateway profile telemetry and command acknowledgements.
+servers:
+  local:
+    host: localhost:1883
+    protocol: mqtt
+channels:
+  telemetry:
+    address: tenants/{tenantId}/devices/{deviceId}/telemetry
+    parameters:
+      tenantId:
+        description: Tenant identifier.
+      deviceId:
+        description: Device identifier.
+    messages:
+      temperature:
+        payload:
+          $ref: '#/components/schemas/TemperatureTelemetry'
+      relay:
+        payload:
+          $ref: '#/components/schemas/RelayTelemetry'
+operations:
+  publishTelemetry:
+    action: receive
+    channel:
+      $ref: '#/channels/telemetry'
+components:
+  schemas:
+    TelemetryBase:
+      type: object
+      required: [messageId, deviceId, tenantId, occurredAt]
+      properties:
+        messageId: { type: string }
+        deviceId: { type: string }
+        tenantId: { type: string }
+        occurredAt: { type: string, format: date-time }
+    TemperatureTelemetry:
+      allOf:
+        - $ref: '#/components/schemas/TelemetryBase'
+        - type: object
+          required: [deviceType, metrics]
+          properties:
+            deviceType: { const: temperature_sensor }
+            metrics:
+              type: object
+              properties:
+                temperature:
+                  type: object
+                  properties:
+                    value: { type: number }
+                    unit: { const: celsius }
+    RelayTelemetry:
+      allOf:
+        - $ref: '#/components/schemas/TelemetryBase'
+        - type: object
+          required: [deviceType, metrics]
+          properties:
+            deviceType: { const: relay }
+            metrics:
+              type: object
+              properties:
+                relayState:
+                  type: object
+                  properties:
+                    value: { type: boolean }
+                    unit: { const: boolean }

@@ -1,0 +1,47 @@
+{
+  "name": "@smart-house/simulador",
+  "version": "0.1.0",
+  "description": "Simulador local de dispositivos MQTT para Smart House",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "tsx src/main.ts",
+    "broker:up": "docker compose up -d --wait",
+    "broker:down": "docker compose down",
+    "broker:logs": "docker compose logs -f mqtt",
+    "lint": "eslint \"{src,tests}/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test": "jest --runInBand",
+    "test:integration": "MQTT_INTEGRATION=true jest --runInBand tests/mqtt.integration.spec.ts"
+  },
+  "dependencies": {
+    "@smart-house/contracts": "workspace:*",
+    "dotenv": "^17.2.3",
+    "mqtt": "^5.14.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.0.0",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-prettier": "^5.2.2",
+    "globals": "^17.0.0",
+    "jest": "^30.0.0",
+    "prettier": "^3.4.2",
+    "ts-jest": "^29.2.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.20.0"
+  },
+  "jest": {
+    "moduleFileExtensions": ["js", "json", "ts"],
+    "rootDir": ".",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.ts$": ["ts-jest", { "tsconfig": "tsconfig.json" }]
+    },
+    "testEnvironment": "node"
+  }
+}
