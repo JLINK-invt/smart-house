@@ -1,0 +1,83 @@
+openapi: 3.1.0
+info:
+  title: Smart House API
+  version: 0.1.0
+  description: Public HTTP contract for the Smart House platform.
+servers:
+  - url: http://localhost:4000/api
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Read API health
+      responses:
+        '200':
+          description: API is available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /spike/telemetry/latest:
+    get:
+      operationId: getLatestSpikeTelemetry
+      summary: Read the latest persisted telemetry for the local spike
+      responses:
+        '200':
+          description: Latest metric for every simulated device and metric pair.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LatestTelemetry'
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, timestamp]
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: api
+        timestamp:
+          type: string
+          format: date-time
+    ApiError:
+      type: object
+      required: [statusCode, message, path, timestamp]
+      properties:
+        statusCode:
+          type: integer
+          minimum: 400
+          maximum: 599
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        path:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+    LatestTelemetry:
+      type: object
+      required: [correlationId, deviceId, metric, value, unit, occurredAt]
+      properties:
+        correlationId:
+          type: string
+        deviceId:
+          type: string
+        metric:
+          type: string
+        value:
+          type: number
+        unit:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time

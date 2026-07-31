@@ -15,13 +15,15 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "generate:http-client": "openapi-typescript ../../contracts/openapi/openapi.yaml -o src/generated/openapi.ts",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "pnpm generate:http-client && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "openapi-typescript": "^7.13.0",
     "typescript": "^5.9.3"
   }
 }
