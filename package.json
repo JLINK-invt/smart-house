@@ -7,15 +7,24 @@
     "node": ">=22"
   },
   "scripts": {
-    "predev": "pnpm --filter @smart-house/contracts build",
-    "dev": "pnpm --parallel --stream --filter @smart-house/contracts --filter @smart-house/api --filter @smart-house/web dev",
-    "build": "pnpm --recursive build",
-    "lint": "pnpm --recursive --if-present lint",
-    "pretest": "pnpm --filter @smart-house/contracts build",
-    "test": "pnpm --recursive --if-present test",
+    "dev": "pnpm --filter @smart-house/contracts build && turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
     "test:e2e": "pnpm --filter @smart-house/api test:e2e",
-    "pretypecheck": "pnpm --filter @smart-house/contracts build",
-    "typecheck": "pnpm --recursive --if-present typecheck",
+    "test:ui": "playwright test",
+    "test:spike": "SPIKE_E2E=true playwright test tests/e2e/spike.spec.ts",
+    "simulator": "pnpm --dir simulador start",
+    "simulator:broker:up": "pnpm --dir simulador broker:up",
+    "simulator:broker:down": "pnpm --dir simulador broker:down",
+    "infra:up": "docker compose -f infra/local/docker-compose.yml up -d --wait",
+    "infra:down": "docker compose -f infra/local/docker-compose.yml down",
+    "db:migrate": "docker compose -f infra/local/docker-compose.yml exec -T postgres sh -c 'for file in /migrations/*.sql; do psql -U smart_house -d smart_house -f \"$file\"; done'",
+    "typecheck": "turbo run typecheck",
     "format": "pnpm --recursive --if-present format"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "turbo": "^2.8.0"
   }
 }
