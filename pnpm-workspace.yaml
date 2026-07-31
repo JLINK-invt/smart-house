@@ -1,7 +1,15 @@
 packages:
   - apps/*
   - packages/*
+  - simulador
 
 allowBuilds:
+  '@scarf/scarf': true
+  esbuild: true
+  protobufjs: true
   sharp: true
   unrs-resolver: true
+
+minimumReleaseAgeExclude:
+  - '@opentelemetry/auto-instrumentations-node@0.79.0'
+  - '@opentelemetry/instrumentation-bunyan@0.66.0'
