@@ -1,29 +1,42 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication } from '@nestjs/common';
-import request from 'supertest';
-import { App } from 'supertest/types';
 import { healthResponseSchema } from '@smart-house/contracts';
+import {
+  FastifyAdapter,
+  NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import { configureApi } from './../src/api-setup';
 import { AppModule } from './../src/app.module';
 
 describe('AppController (e2e)', () => {
-  let app: INestApplication<App>;
+  let app: NestFastifyApplication;
 
   beforeEach(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
-    app.setGlobalPrefix('api');
+    app = moduleFixture.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter(),
+    );
+    configureApi(app);
     await app.init();
+    await app.getHttpAdapter().getInstance().ready();
   });
 
   it('/api/health (GET)', async () => {
-    const response = await request(app.getHttpServer())
-      .get('/api/health')
-      .expect(200);
+    const response = await app.inject({ method: 'GET', url: '/api/health' });
 
-    expect(healthResponseSchema.safeParse(response.body).success).toBe(true);
+    expect(response.statusCode).toBe(200);
+    expect(healthResponseSchema.safeParse(response.json()).success).toBe(true);
+  });
+
+  it('/api/docs-json (GET)', async () => {
+    const response = await app.inject({ method: 'GET', url: '/api/docs-json' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      info: { title: 'Smart House API' },
+    });
   });
 
   afterEach(async () => {
