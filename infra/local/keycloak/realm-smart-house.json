@@ -1,0 +1,53 @@
+{
+  "realm": "smart-house",
+  "enabled": true,
+  "displayName": "Smart House Local",
+  "registrationAllowed": true,
+  "resetPasswordAllowed": true,
+  "smtpServer": {
+    "host": "mailpit",
+    "port": "1025",
+    "from": "no-reply@smart-house.local",
+    "auth": "false",
+    "starttls": "false",
+    "ssl": "false"
+  },
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "owner" },
+      { "name": "admin" },
+      { "name": "operator" },
+      { "name": "viewer" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "smart-house-web",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://localhost:3000/auth/callback"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "smart-house-web audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "smart-house-web",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}

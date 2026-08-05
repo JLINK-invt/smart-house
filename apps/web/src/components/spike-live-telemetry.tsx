@@ -3,20 +3,20 @@
 import { useEffect, useState } from "react";
 import { io } from "socket.io-client";
 
-type Props = { apiOrigin: string };
+type Props = { apiOrigin: string; accessToken: string };
 
-export function SpikeLiveTelemetry({ apiOrigin }: Props) {
+export function SpikeLiveTelemetry({ apiOrigin, accessToken }: Props) {
   const [correlationId, setCorrelationId] = useState<string | null>(null);
 
   useEffect(() => {
-    const socket = io(`${apiOrigin}/spike`);
+    const socket = io(`${apiOrigin}/spike`, { auth: { accessToken } });
     socket.on("telemetry.persisted", (event: { correlationId?: string }) => {
       setCorrelationId(event.correlationId ?? null);
     });
     return () => {
       socket.disconnect();
     };
-  }, [apiOrigin]);
+  }, [accessToken, apiOrigin]);
 
   return (
     <p className="live-telemetry" role="status">
