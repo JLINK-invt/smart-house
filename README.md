@@ -62,6 +62,11 @@ Los comandos se ejecutan desde la raiz para respetar el orden de dependencias de
 El simulador local de `temp-001` y `relay-001` se encuentra en [`simulador/`](simulador/README.md). Para levantar su broker Mosquitto e iniciarlo:
 
 ```bash
+pnpm mqtt:certs
 pnpm simulator:broker:up
 pnpm simulator
 ```
+
+El broker local MQTT usa mTLS en `127.0.0.1:8883` y ACL por tópico. Consulta
+[`infra/local/README.md`](infra/local/README.md) para las identidades y la
+prueba de aislamiento entre dispositivos.

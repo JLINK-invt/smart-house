@@ -4,8 +4,14 @@ export function createTestConfig(
   overrides: Partial<NodeJS.ProcessEnv> = {},
 ): SimulatorConfig {
   return readConfig({
-    MQTT_URL: 'mqtt://localhost:1883',
-    MQTT_CLIENT_ID: 'smart-house-simulador-test',
+    MQTT_URL: 'mqtts://localhost:8883',
+    MQTT_CA_FILE: '../infra/local/certs/ca.crt',
+    TEMPERATURE_MQTT_CLIENT_ID: 'smart-house-temperature-test',
+    TEMPERATURE_MQTT_CERT_FILE: '../infra/local/certs/device-temp-001.crt',
+    TEMPERATURE_MQTT_KEY_FILE: '../infra/local/certs/device-temp-001.key',
+    RELAY_MQTT_CLIENT_ID: 'smart-house-relay-test',
+    RELAY_MQTT_CERT_FILE: '../infra/local/certs/device-relay-001.crt',
+    RELAY_MQTT_KEY_FILE: '../infra/local/certs/device-relay-001.key',
     TENANT_ID: 'demo',
     TEMPERATURE_DEVICE_ID: 'temp-001',
     RELAY_DEVICE_ID: 'relay-001',

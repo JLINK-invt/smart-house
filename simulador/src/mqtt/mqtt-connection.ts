@@ -3,6 +3,7 @@ import {
   type IClientOptions,
   type MqttClient,
 } from 'mqtt';
+import { readFileSync } from 'node:fs';
 import type { SimulatorConfig } from '../config';
 import { log } from '../logger';
 import type {
@@ -15,7 +16,15 @@ export class MqttConnection implements MqttPublisher {
   private client?: MqttClient;
   private commandHandler?: MqttCommandHandler;
 
-  constructor(private readonly config: SimulatorConfig) {}
+  constructor(
+    private readonly config: SimulatorConfig,
+    private readonly identity: {
+      clientId: string;
+      certFile: string;
+      keyFile: string;
+      commandTopic?: string;
+    },
+  ) {}
 
   setCommandHandler(handler: MqttCommandHandler): void {
     this.commandHandler = handler;
@@ -27,7 +36,11 @@ export class MqttConnection implements MqttPublisher {
     }
 
     const options: IClientOptions = {
-      clientId: this.config.MQTT_CLIENT_ID,
+      clientId: this.identity.clientId,
+      ca: readFileSync(this.config.MQTT_CA_FILE),
+      cert: readFileSync(this.identity.certFile),
+      key: readFileSync(this.identity.keyFile),
+      rejectUnauthorized: true,
       clean: true,
       reconnectPeriod: 1_000,
       connectTimeout: 10_000,
@@ -62,28 +75,32 @@ export class MqttConnection implements MqttPublisher {
       let initialConnection = true;
 
       client.on('connect', () => {
-        client.subscribe(
-          this.config.relayCommandsTopic,
-          { qos: 1 },
-          (error) => {
-            if (error) {
-              log('error', 'mqtt.subscription_failed', {
-                message: error.message,
-                topic: this.config.relayCommandsTopic,
-              });
-              return;
-            }
-
-            log('info', 'mqtt.connected', {
-              clientId: this.config.MQTT_CLIENT_ID,
-              commandTopic: this.config.relayCommandsTopic,
+        const commandTopic = this.identity.commandTopic;
+        if (!commandTopic) {
+          if (initialConnection) {
+            initialConnection = false;
+            resolve();
+          }
+          return;
+        }
+        client.subscribe(commandTopic, { qos: 1 }, (error) => {
+          if (error) {
+            log('error', 'mqtt.subscription_failed', {
+              message: error.message,
+              topic: commandTopic,
             });
-            if (initialConnection) {
-              initialConnection = false;
-              resolve();
-            }
-          },
-        );
+            return;
+          }
+
+          log('info', 'mqtt.connected', {
+            clientId: this.identity.clientId,
+            commandTopic,
+          });
+          if (initialConnection) {
+            initialConnection = false;
+            resolve();
+          }
+        });
       });
     });
   }

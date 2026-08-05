@@ -5,7 +5,10 @@ Simulador local y autocontenido para dos dispositivos del tenant `demo`:
 - `temp-001` publica temperatura cada 30 segundos.
 - `relay-001` recibe comandos `relay.set`, publica su estado y responde con un ACK.
 
-Todos los mensajes MQTT usan QoS 1. El broker incluido es solo para desarrollo local: escucha en `127.0.0.1`, permite conexiones anonimas y no utiliza TLS. Produccion requerira TLS/mTLS, credenciales por dispositivo y ACL por topico.
+Todos los mensajes MQTT usan QoS 1. El broker local escucha solo con mTLS en
+`127.0.0.1:8883`; no admite conexiones anónimas ni MQTT sin TLS. El simulador
+abre una conexión con certificado para cada dispositivo, de forma que Mosquitto
+aplica la ACL por tópico.
 
 ## Requisitos
 
@@ -19,6 +22,7 @@ Desde la raiz del repositorio:
 
 ```bash
 pnpm install
+pnpm mqtt:certs
 pnpm simulator:broker:up
 pnpm simulator
 ```
@@ -26,6 +30,7 @@ pnpm simulator
 Tambien se puede trabajar directamente desde esta carpeta:
 
 ```bash
+pnpm --dir .. mqtt:certs
 pnpm broker:up
 pnpm start
 ```
@@ -38,8 +43,12 @@ Consulta `.env.example`. Los valores principales son:
 
 | Variable | Valor por defecto | Uso |
 | --- | --- | --- |
-| `MQTT_URL` | `mqtt://localhost:1883` | Direccion del broker |
-| `MQTT_CLIENT_ID` | `smart-house-simulador` | Identidad local del cliente |
+| `MQTT_URL` | `mqtts://localhost:8883` | Dirección TLS del broker |
+| `MQTT_CA_FILE` | requerido | CA que valida el certificado del broker |
+| `TEMPERATURE_MQTT_CLIENT_ID` | `smart-house-temperature` | Cliente del sensor |
+| `TEMPERATURE_MQTT_CERT_FILE` / `TEMPERATURE_MQTT_KEY_FILE` | requerido | Identidad mTLS del sensor |
+| `RELAY_MQTT_CLIENT_ID` | `smart-house-relay` | Cliente del relay |
+| `RELAY_MQTT_CERT_FILE` / `RELAY_MQTT_KEY_FILE` | requerido | Identidad mTLS del relay |
 | `TENANT_ID` | `demo` | Tenant simulado |
 | `TEMPERATURE_DEVICE_ID` | `temp-001` | Sensor de temperatura |
 | `RELAY_DEVICE_ID` | `relay-001` | Relay controlable |
@@ -67,6 +76,7 @@ En otra terminal, con el simulador activo:
 ```bash
 docker compose -f simulador/docker-compose.yml exec -T mqtt mosquitto_pub \
   -h localhost \
+  -p 8883 --cafile /mosquitto/certs/ca.crt --cert /mosquitto/certs/platform-worker.crt --key /mosquitto/certs/platform-worker.key \
   -q 1 \
   -t tenants/demo/devices/relay-001/commands \
   -m '{"commandId":"cmd-001","nonce":"nonce-001","tenantId":"demo","deviceId":"relay-001","commandType":"relay.set","issuedAt":"2026-07-31T12:00:00Z","expiresAt":"2099-07-31T12:00:30Z","payload":{"state":"on"}}'
@@ -77,6 +87,7 @@ Observar telemetria y ACK:
 ```bash
 docker compose -f simulador/docker-compose.yml exec -T mqtt mosquitto_sub \
   -h localhost \
+  -p 8883 --cafile /mosquitto/certs/ca.crt --cert /mosquitto/certs/platform-worker.crt --key /mosquitto/certs/platform-worker.key \
   -v \
   -q 1 \
   -t 'tenants/demo/devices/+/+'

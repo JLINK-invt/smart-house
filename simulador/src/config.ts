@@ -6,8 +6,36 @@ const booleanFromEnvironment = z
   .transform((value) => value === 'true');
 
 const environmentSchema = z.object({
-  MQTT_URL: z.string().url().default('mqtt://localhost:1883'),
-  MQTT_CLIENT_ID: z.string().min(1).max(128).default('smart-house-simulador'),
+  MQTT_URL: z
+    .string()
+    .url()
+    .refine((value) => new URL(value).protocol === 'mqtts:', {
+      message: 'MQTT_URL must use mqtts://',
+    })
+    .default('mqtts://localhost:8883'),
+  MQTT_CA_FILE: z.string().min(1).default('../infra/local/certs/ca.crt'),
+  TEMPERATURE_MQTT_CLIENT_ID: z
+    .string()
+    .min(1)
+    .max(128)
+    .default('smart-house-temperature'),
+  TEMPERATURE_MQTT_CERT_FILE: z
+    .string()
+    .min(1)
+    .default('../infra/local/certs/device-temp-001.crt'),
+  TEMPERATURE_MQTT_KEY_FILE: z
+    .string()
+    .min(1)
+    .default('../infra/local/certs/device-temp-001.key'),
+  RELAY_MQTT_CLIENT_ID: z.string().min(1).max(128).default('smart-house-relay'),
+  RELAY_MQTT_CERT_FILE: z
+    .string()
+    .min(1)
+    .default('../infra/local/certs/device-relay-001.crt'),
+  RELAY_MQTT_KEY_FILE: z
+    .string()
+    .min(1)
+    .default('../infra/local/certs/device-relay-001.key'),
   TENANT_ID: z.string().min(1).max(64).default('demo'),
   TEMPERATURE_DEVICE_ID: z.string().min(1).max(128).default('temp-001'),
   RELAY_DEVICE_ID: z.string().min(1).max(128).default('relay-001'),
