@@ -107,7 +107,7 @@ export class OrganizationsService implements OnModuleDestroy {
     return result.rows[0].id;
   }
 
-  private async requireMembership(
+  async requireMembership(
     identity: Identity,
     organizationId: string,
   ): Promise<Membership> {

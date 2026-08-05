@@ -1,0 +1,12 @@
+# Device certificate CNs are their MQTT topic prefix. They can only read
+# commands and write telemetry/acknowledgements for that exact device.
+pattern read %u/commands
+pattern write %u/telemetry
+pattern write %u/command-acks
+
+# The ingestion worker is the only platform identity in local development.
+user platform-worker
+topic read $SYS/#
+topic read tenants/+/devices/+/telemetry
+topic read tenants/+/devices/+/command-acks
+topic write tenants/+/devices/+/commands

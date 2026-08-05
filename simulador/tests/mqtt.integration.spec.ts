@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { connect, type IClientPublishOptions, type MqttClient } from 'mqtt';
 import { commandAckSchema } from '../src/contracts/command-ack';
 import { temperatureTelemetrySchema } from '../src/contracts/telemetry';
@@ -50,6 +51,44 @@ function disconnect(client: MqttClient): Promise<void> {
   );
 }
 
+function credentials(name: string) {
+  return {
+    ca: readFileSync('../infra/local/certs/ca.crt'),
+    cert: readFileSync(`../infra/local/certs/${name}.crt`),
+    key: readFileSync(`../infra/local/certs/${name}.key`),
+    protocolVersion: 5 as const,
+    reconnectPeriod: 0,
+  };
+}
+
+function subscribeDenied(client: MqttClient, topic: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    client.subscribe(topic, { qos: 1 }, (error, granted) => {
+      if (error) {
+        resolve();
+        return;
+      }
+      if (!granted) {
+        reject(new Error(`Subscription to ${topic} was not acknowledged`));
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+function publishDenied(client: MqttClient, topic: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    client.publish(topic, 'denied', { qos: 1 }, (error) => {
+      if (error) {
+        resolve();
+        return;
+      }
+      reject(new Error(`Publication to ${topic} was accepted`));
+    });
+  });
+}
+
 async function waitUntil(
   predicate: () => boolean,
   timeoutMs = 5_000,
@@ -69,11 +108,12 @@ describeWithBroker('MQTT simulator integration', () => {
   it('publishes temperature and acknowledges a relay command', async () => {
     const suffix = randomUUID().slice(0, 8);
     const config = createTestConfig({
-      MQTT_CLIENT_ID: `simulator-${suffix}`,
+      TEMPERATURE_MQTT_CLIENT_ID: `temperature-${suffix}`,
+      RELAY_MQTT_CLIENT_ID: `relay-${suffix}`,
     });
     const observer = connect(config.MQTT_URL, {
       clientId: `observer-${suffix}`,
-      reconnectPeriod: 0,
+      ...credentials('platform-worker'),
     });
     const received = new Map<string, string[]>();
     observer.on('message', (topic, payload) => {
@@ -85,13 +125,23 @@ describeWithBroker('MQTT simulator integration', () => {
     await waitForConnection(observer);
     await subscribe(observer, 'tenants/demo/devices/+/+');
 
-    const mqtt = new MqttConnection(config);
-    const relay = new RelayDevice(config, mqtt);
-    const sensor = new TemperatureSensor(config, mqtt);
-    mqtt.setCommandHandler((topic, payload) =>
+    const temperatureMqtt = new MqttConnection(config, {
+      clientId: config.TEMPERATURE_MQTT_CLIENT_ID,
+      certFile: config.TEMPERATURE_MQTT_CERT_FILE,
+      keyFile: config.TEMPERATURE_MQTT_KEY_FILE,
+    });
+    const relayMqtt = new MqttConnection(config, {
+      clientId: config.RELAY_MQTT_CLIENT_ID,
+      certFile: config.RELAY_MQTT_CERT_FILE,
+      keyFile: config.RELAY_MQTT_KEY_FILE,
+      commandTopic: config.relayCommandsTopic,
+    });
+    const relay = new RelayDevice(config, relayMqtt);
+    const sensor = new TemperatureSensor(config, temperatureMqtt);
+    relayMqtt.setCommandHandler((topic, payload) =>
       relay.handleCommand(topic, payload),
     );
-    await mqtt.connect();
+    await Promise.all([temperatureMqtt.connect(), relayMqtt.connect()]);
 
     try {
       await sensor.publishTelemetry();
@@ -128,8 +178,58 @@ describeWithBroker('MQTT simulator integration', () => {
         result: { state: 'on' },
       });
     } finally {
-      await mqtt.disconnect();
+      await Promise.all([temperatureMqtt.disconnect(), relayMqtt.disconnect()]);
       await disconnect(observer);
+    }
+  });
+
+  it('denies a device access to another device topic', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const temp = connect('mqtts://localhost:8883', {
+      clientId: `temp-${suffix}`,
+      ...credentials('device-temp-001'),
+    });
+    const other = connect('mqtts://localhost:8883', {
+      clientId: `other-${suffix}`,
+      ...credentials('device-other-001'),
+    });
+    const platform = connect('mqtts://localhost:8883', {
+      clientId: `platform-${suffix}`,
+      ...credentials('platform-worker'),
+    });
+    let crossDeviceCommandReceived = false;
+    other.on('message', () => {
+      crossDeviceCommandReceived = true;
+    });
+
+    await Promise.all([
+      waitForConnection(temp),
+      waitForConnection(other),
+      waitForConnection(platform),
+    ]);
+    try {
+      await expect(
+        publishDenied(other, 'tenants/demo/devices/temp-001/telemetry'),
+      ).resolves.toBeUndefined();
+      await expect(
+        subscribeDenied(other, 'tenants/demo/devices/temp-001/commands'),
+      ).resolves.toBeUndefined();
+      await publish(
+        platform,
+        'tenants/demo/devices/temp-001/commands',
+        'cross-device-command',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(crossDeviceCommandReceived).toBe(false);
+      await expect(
+        subscribeDenied(temp, 'tenants/demo/devices/other-001/commands'),
+      ).resolves.toBeUndefined();
+    } finally {
+      await Promise.all([
+        disconnect(temp),
+        disconnect(other),
+        disconnect(platform),
+      ]);
     }
   });
 });

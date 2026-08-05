@@ -5,8 +5,9 @@ info:
   description: Simulated gateway profile telemetry and command acknowledgements.
 servers:
   local:
-    host: localhost:1883
-    protocol: mqtt
+    host: localhost:8883
+    protocol: mqtts
+    description: Local development requires a client certificate issued by infra/local/certs/ca.crt.
 channels:
   telemetry:
     address: tenants/{tenantId}/devices/{deviceId}/telemetry

@@ -5,6 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { telemetrySchema, type Telemetry } from '@smart-house/contracts';
+import { readFileSync } from 'node:fs';
 import Redis from 'ioredis';
 import { connect, type MqttClient } from 'mqtt';
 import { Pool } from 'pg';
@@ -19,6 +20,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private database?: Pool;
   private redis?: Redis;
   private mqtt?: MqttClient;
+  private reconciliationTimer?: NodeJS.Timeout;
 
   async onModuleInit(): Promise<void> {
     this.database = new Pool({ connectionString: this.config.DATABASE_URL });
@@ -29,9 +31,15 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     await this.database.query('SELECT 1');
     await this.redis.ping();
     this.connectMqtt();
+    this.reconciliationTimer = setInterval(
+      () => void this.reconcileDeviceStatuses(),
+      this.config.DEVICE_STATUS_RECONCILIATION_INTERVAL_MS,
+    );
+    void this.reconcileDeviceStatuses();
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
     await this.database?.end();
     await this.redis?.quit();
     await new Promise<void>(
@@ -45,7 +53,11 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
   private connectMqtt(): void {
     this.mqtt = connect(this.config.MQTT_URL, {
-      clientId: `smart-house-ingestion-${crypto.randomUUID()}`,
+      clientId: `${this.config.MQTT_CLIENT_ID}-${crypto.randomUUID()}`,
+      ca: readFileSync(this.config.MQTT_CA_FILE),
+      cert: readFileSync(this.config.MQTT_CERT_FILE),
+      key: readFileSync(this.config.MQTT_KEY_FILE),
+      rejectUnauthorized: true,
       reconnectPeriod: 1_000,
     });
 
@@ -93,43 +105,68 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
   private async persist(telemetry: Telemetry): Promise<void> {
     const organizationId = await this.ensureOrganization(telemetry.tenantId);
-    const deviceId = await this.ensureDevice(organizationId, telemetry);
-    const metric =
+    const device = await this.ensureDevice(organizationId, telemetry);
+    const catalog = await this.catalogFor(
+      device.type,
+      device.capabilityVersion,
+    );
+    if (device.type !== telemetry.deviceType) {
+      throw new Error(
+        'Telemetry device type does not match the registered device.',
+      );
+    }
+    const readings =
       telemetry.deviceType === 'temperature_sensor'
-        ? 'temperature'
-        : 'relay_state';
-    const reading =
-      telemetry.deviceType === 'temperature_sensor'
-        ? telemetry.metrics.temperature
-        : {
-            value: telemetry.metrics.relayState.value ? 1 : 0,
-            unit: 'boolean',
-          };
+        ? [
+            {
+              metric: 'temperature',
+              value: telemetry.metrics.temperature.value,
+              unit: telemetry.metrics.temperature.unit,
+            },
+          ]
+        : [
+            {
+              metric: 'relayState',
+              value: Number(telemetry.metrics.relayState.value),
+              unit: telemetry.metrics.relayState.unit,
+            },
+          ];
+    if (!readings.every(({ metric }) => catalog.metrics.includes(metric))) {
+      throw new Error(
+        'Telemetry contains a metric not supported by the registered device.',
+      );
+    }
 
-    const result = await this.databaseOrThrow().query(
-      `INSERT INTO telemetry_records (organization_id, device_id, message_id, metric, value, unit, occurred_at)
+    for (const reading of readings) {
+      const result = await this.databaseOrThrow().query(
+        `INSERT INTO telemetry_records (organization_id, device_id, message_id, metric, value, unit, occurred_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (organization_id, device_id, message_id, metric, occurred_at) DO NOTHING`,
-      [
-        organizationId,
-        deviceId,
-        telemetry.messageId,
-        metric,
-        reading.value,
-        reading.unit,
-        telemetry.occurredAt,
-      ],
-    );
-    if (result.rowCount === 0) {
-      this.logger.debug(`Ignored duplicate telemetry ${telemetry.messageId}.`);
-      return;
+        [
+          organizationId,
+          device.id,
+          telemetry.messageId,
+          reading.metric,
+          reading.value,
+          reading.unit,
+          telemetry.occurredAt,
+        ],
+      );
+      if (result.rowCount === 0) {
+        this.logger.debug(
+          `Ignored duplicate telemetry ${telemetry.messageId}.`,
+        );
+        return;
+      }
     }
+
+    await this.updateDevicePresence(device.id, telemetry.occurredAt);
 
     await this.redisOrThrow().publish(
       'telemetry.persisted',
       JSON.stringify({
         correlationId: telemetry.messageId,
-        metric,
+        metric: readings.map(({ metric }) => metric).join(','),
         organizationId,
         telemetry,
       }),
@@ -153,18 +190,79 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private async ensureDevice(
     organizationId: string,
     telemetry: Telemetry,
-  ): Promise<string> {
-    const existing = await this.databaseOrThrow().query<{ id: string }>(
-      'SELECT id FROM devices WHERE organization_id = $1 AND external_id = $2 LIMIT 1',
+  ): Promise<{ id: string; type: string; capabilityVersion: string }> {
+    const existing = await this.databaseOrThrow().query<{
+      id: string;
+      type: string;
+      capabilityVersion: string;
+    }>(
+      `SELECT id, type, capability_version AS "capabilityVersion"
+       FROM devices WHERE organization_id = $1 AND external_id = $2 LIMIT 1`,
       [organizationId, telemetry.deviceId],
     );
-    if (existing.rows[0]) return existing.rows[0].id;
-    const created = await this.databaseOrThrow().query<{ id: string }>(
-      `INSERT INTO devices (organization_id, external_id, name, type, status)
-       VALUES ($1, $2, $2, $3, 'online') RETURNING id`,
+    if (existing.rows[0]) return existing.rows[0];
+    const created = await this.databaseOrThrow().query<{
+      id: string;
+      type: string;
+      capabilityVersion: string;
+    }>(
+      `INSERT INTO devices (organization_id, external_id, name, type, capability_version)
+        VALUES ($1, $2, $2, $3, 'v1')
+       RETURNING id, type, capability_version AS "capabilityVersion"`,
       [organizationId, telemetry.deviceId, telemetry.deviceType],
     );
-    return created.rows[0].id;
+    return created.rows[0];
+  }
+
+  private async catalogFor(type: string, version: string) {
+    const result = await this.databaseOrThrow().query<{ metrics: string[] }>(
+      `SELECT metrics FROM device_capability_catalog
+       WHERE device_type = $1 AND version = $2`,
+      [type, version],
+    );
+    if (!result.rows[0]) {
+      throw new Error('Registered device has no capability catalog.');
+    }
+    return result.rows[0];
+  }
+
+  private async updateDevicePresence(
+    deviceId: string,
+    occurredAt: string,
+  ): Promise<void> {
+    await this.databaseOrThrow().query(
+      `UPDATE devices
+       SET last_seen_at = GREATEST(COALESCE(last_seen_at, '-infinity'::timestamptz), $2::timestamptz),
+           status = CASE
+             WHEN status = 'disabled' THEN 'disabled'
+             WHEN $2::timestamptz >= now() - ($3 * interval '1 second')
+                  AND $2::timestamptz >= COALESCE(last_seen_at, '-infinity'::timestamptz)
+               THEN 'online'
+             ELSE status
+           END,
+           updated_at = now()
+       WHERE id = $1`,
+      [deviceId, occurredAt, this.config.DEVICE_ONLINE_GRACE_PERIOD_SECONDS],
+    );
+  }
+
+  private async reconcileDeviceStatuses(): Promise<void> {
+    try {
+      const result = await this.databaseOrThrow().query(
+        `UPDATE devices SET status = 'offline', updated_at = now()
+         WHERE status = 'online'
+           AND (last_seen_at IS NULL OR last_seen_at < now() - ($1 * interval '1 second'))`,
+        [this.config.DEVICE_ONLINE_GRACE_PERIOD_SECONDS],
+      );
+      if (result.rowCount) {
+        this.logger.log(`Marked ${result.rowCount} stale device(s) offline.`);
+      }
+    } catch (error) {
+      this.logger.error(
+        'Failed to reconcile device presence.',
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
   }
 
   private databaseOrThrow(): Pool {

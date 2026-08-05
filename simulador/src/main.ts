@@ -12,18 +12,28 @@ async function bootstrap(): Promise<void> {
     config.ENABLE_SIMULATION_PROFILES,
     config.SIMULATION_PROFILE,
   );
-  const mqtt = new MqttConnection(config);
-  const temperatureSensor = new TemperatureSensor(config, mqtt);
-  const relay = new RelayDevice(config, mqtt);
+  const temperatureMqtt = new MqttConnection(config, {
+    clientId: config.TEMPERATURE_MQTT_CLIENT_ID,
+    certFile: config.TEMPERATURE_MQTT_CERT_FILE,
+    keyFile: config.TEMPERATURE_MQTT_KEY_FILE,
+  });
+  const relayMqtt = new MqttConnection(config, {
+    clientId: config.RELAY_MQTT_CLIENT_ID,
+    certFile: config.RELAY_MQTT_CERT_FILE,
+    keyFile: config.RELAY_MQTT_KEY_FILE,
+    commandTopic: config.relayCommandsTopic,
+  });
+  const temperatureSensor = new TemperatureSensor(config, temperatureMqtt);
+  const relay = new RelayDevice(config, relayMqtt);
 
-  mqtt.setCommandHandler((topic, payload) =>
+  relayMqtt.setCommandHandler((topic, payload) =>
     relay.handleCommand(topic, payload),
   );
 
   const shutdown = async (signal: string): Promise<void> => {
     log('info', 'simulator.stopping', { signal });
     temperatureSensor.stop();
-    await mqtt.disconnect();
+    await Promise.all([temperatureMqtt.disconnect(), relayMqtt.disconnect()]);
     process.exitCode = 0;
   };
   process.once('SIGINT', () => void shutdown('SIGINT'));
@@ -35,12 +45,12 @@ async function bootstrap(): Promise<void> {
     selected: profileEngine.selectedProfile().name,
   });
 
-  await mqtt.connect();
+  await Promise.all([temperatureMqtt.connect(), relayMqtt.connect()]);
   await relay.publishState();
 
   if (config.PUBLISH_ONCE) {
     await temperatureSensor.publishTelemetry();
-    await mqtt.disconnect();
+    await Promise.all([temperatureMqtt.disconnect(), relayMqtt.disconnect()]);
     return;
   }
 
