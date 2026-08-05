@@ -130,6 +130,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       JSON.stringify({
         correlationId: telemetry.messageId,
         metric,
+        organizationId,
         telemetry,
       }),
     );

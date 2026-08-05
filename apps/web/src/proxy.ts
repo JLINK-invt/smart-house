@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const sessionCookie = "smart-house-session";
+const sessionCookie = "smart-house-access-token";
 
 export function proxy(request: NextRequest) {
   if (!request.cookies.has(sessionCookie)) {

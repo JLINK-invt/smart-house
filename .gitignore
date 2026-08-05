@@ -11,3 +11,6 @@ coverage/
 *.log
 .DS_Store
 .vercel/
+.turbo/
+.agents/
+test-results/

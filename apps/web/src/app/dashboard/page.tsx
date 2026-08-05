@@ -1,6 +1,8 @@
 import { getApiStatus, getLatestTelemetry } from "@/lib/api";
 import { getApiUrl } from "@/lib/config";
 import { SpikeLiveTelemetry } from "@/components/spike-live-telemetry";
+import { cookies } from "next/headers";
+import { accessTokenCookie } from "@/lib/auth";
 const milestones = [
   { name: "Organizaciones y miembros", state: "Pendiente", detail: "Autenticación, tenancy y roles del MVP." },
   { name: "Dispositivos", state: "Pendiente", detail: "Registro, activación y estado de la flota." },
@@ -9,7 +11,8 @@ const milestones = [
 ];
 
 export default async function DashboardPage() {
-  const [api, telemetry] = await Promise.all([getApiStatus(), getLatestTelemetry()]);
+  const accessToken = (await cookies()).get(accessTokenCookie)?.value ?? "";
+  const [api, telemetry] = await Promise.all([getApiStatus(), getLatestTelemetry(accessToken)]);
   const temperature = telemetry.find((reading) => reading.metric === "temperature");
   const relay = telemetry.find((reading) => reading.metric === "relay_state");
 
@@ -49,7 +52,7 @@ export default async function DashboardPage() {
           <article className="feature-card"><span>Relay</span><strong>{relay ? (relay.value === 1 ? "ON" : "OFF") : "--"}</strong><p>{relay ? `relay-001 · ${relay.correlationId}` : "Esperando estado del relay."}</p></article>
           <article className="feature-card"><span>Ruta</span><strong>{telemetry.length > 0 ? "Activa" : "En espera"}</strong><p>MQTT → Worker → PostgreSQL → Redis → API.</p></article>
         </div>
-        <SpikeLiveTelemetry apiOrigin={getApiUrl()} />
+        <SpikeLiveTelemetry apiOrigin={getApiUrl()} accessToken={accessToken} />
       </section>
 
       <section className="milestones" aria-labelledby="milestones-title">

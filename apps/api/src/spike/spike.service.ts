@@ -13,7 +13,7 @@ export class SpikeService implements OnModuleDestroy {
     await this.database.end();
   }
 
-  async getLatestTelemetry(): Promise<LatestTelemetry> {
+  async getLatestTelemetry(subject: string): Promise<LatestTelemetry> {
     const result = await this.database.query<{
       correlation_id: string;
       device_id: string;
@@ -27,9 +27,11 @@ export class SpikeService implements OnModuleDestroy {
          t.metric, t.value, t.unit, t.occurred_at
        FROM telemetry_records t
        JOIN devices d ON d.id = t.device_id
-       JOIN organizations o ON o.id = t.organization_id
-       WHERE o.name = 'Simulator demo'
+       JOIN memberships m ON m.organization_id = t.organization_id
+       JOIN users member ON member.id = m.user_id
+       WHERE member.subject = $1 AND m.status = 'active'
        ORDER BY d.external_id, t.metric, t.occurred_at DESC`,
+      [subject],
     );
 
     return result.rows.map((row) => ({

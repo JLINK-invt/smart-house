@@ -57,6 +57,7 @@ export function DashboardSidebar() {
         <div className="sidebar-foot">
           <span className="live-dot" />
           Entorno local
+          <a href="/auth/logout">Cerrar sesión</a>
         </div>
       </aside>
     </>
