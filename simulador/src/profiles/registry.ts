@@ -10,6 +10,8 @@ const normal: SimulationProfile = {
   reconnectAfterMs: 0,
   relayCommandDelayMs: 100,
   relayFailureRate: 0,
+  burstRate: 0,
+  burstSize: 1,
 };
 
 export const simulationProfiles: ReadonlyMap<
@@ -53,6 +55,17 @@ export const simulationProfiles: ReadonlyMap<
       description: 'Introduce latencia y fallos controlados en el relay.',
       relayCommandDelayMs: 1_500,
       relayFailureRate: 0.2,
+    },
+  ],
+  [
+    'burst',
+    {
+      ...normal,
+      name: 'burst',
+      description:
+        'Publica rafagas de telemetria validas para pruebas de carga.',
+      burstRate: 1,
+      burstSize: 20,
     },
   ],
 ]);

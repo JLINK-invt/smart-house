@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "2.0",
+  "messageId": "msg-temp-001-example-invalid-version",
+  "deviceId": "temp-001",
+  "tenantId": "demo",
+  "occurredAt": "2026-08-06T12:00:00.000Z",
+  "deviceType": "temperature_sensor",
+  "metrics": {
+    "temperature": { "value": 24.1, "unit": "celsius" }
+  }
+}

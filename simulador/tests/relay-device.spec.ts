@@ -2,6 +2,7 @@ import { commandAckSchema } from '../src/contracts/command-ack';
 import { relayTelemetrySchema } from '../src/contracts/telemetry';
 import { RelayDevice } from '../src/devices/relay-device';
 import { MessageIdGenerator } from '../src/message-id';
+import { ProfileEngine } from '../src/profiles/profile-engine';
 import { FakePublisher } from './fake-publisher';
 import { createTestConfig } from './test-config';
 
@@ -143,5 +144,34 @@ describe('RelayDevice', () => {
 
     expect(relay.state).toBe('on');
     expect(mqtt.messages).toHaveLength(2);
+  });
+
+  it('returns and remembers a controlled relay failure from the active profile', async () => {
+    const mqtt = new FakePublisher();
+    const config = createTestConfig();
+    const relay = new RelayDevice(
+      config,
+      mqtt,
+      undefined,
+      undefined,
+      () => now,
+      new ProfileEngine(true, 'relay-failures', 'seed', () => 0),
+    );
+    const payload = Buffer.from(JSON.stringify(createCommand()));
+    const startedAt = Date.now();
+
+    await relay.handleCommand(config.relayCommandsTopic, payload);
+    await relay.handleCommand(config.relayCommandsTopic, payload);
+
+    expect(relay.state).toBe('off');
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_000);
+    expect(mqtt.messages).toHaveLength(2);
+    expect(mqtt.messages[1]?.payload).toBe(mqtt.messages[0]?.payload);
+    expect(
+      commandAckSchema.parse(JSON.parse(mqtt.messages[0]?.payload ?? '')),
+    ).toMatchObject({
+      status: 'failed',
+      error: { code: 'simulated_failure' },
+    });
   });
 });

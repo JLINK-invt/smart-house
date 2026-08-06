@@ -12,6 +12,7 @@ import {
 import { log } from '../logger';
 import { MessageIdGenerator } from '../message-id';
 import type { MqttPublisher } from '../mqtt/transport';
+import { ProfileEngine } from '../profiles/profile-engine';
 
 const MAX_REMEMBERED_COMMANDS = 1_000;
 
@@ -29,6 +30,7 @@ export class RelayDevice {
       `ack-${config.RELAY_DEVICE_ID}`,
     ),
     private readonly now: () => Date = () => new Date(),
+    private readonly profiles?: ProfileEngine,
   ) {}
 
   get state(): 'on' | 'off' {
@@ -112,6 +114,7 @@ export class RelayDevice {
 
   async publishState(): Promise<RelayTelemetry> {
     const telemetry = relayTelemetrySchema.parse({
+      schemaVersion: '1.0',
       messageId: this.telemetryMessageIds.next(),
       deviceId: this.config.RELAY_DEVICE_ID,
       deviceType: 'relay',
@@ -137,10 +140,25 @@ export class RelayDevice {
   }
 
   private async execute(command: RelayCommand): Promise<void> {
-    if (this.config.COMMAND_PROCESSING_DELAY_MS > 0) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, this.config.COMMAND_PROCESSING_DELAY_MS),
+    const decision = this.profiles?.nextRelayDecision(
+      this.config.COMMAND_PROCESSING_DELAY_MS,
+    ) ?? { delayMs: this.config.COMMAND_PROCESSING_DELAY_MS, fail: false };
+    if (decision.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
+    }
+
+    if (decision.fail) {
+      const ack = this.createFailureAck(
+        command.commandId,
+        'simulated_failure',
+        'Command failed due to the active simulation profile',
       );
+      this.rememberCommand(command.commandId, ack);
+      await this.publishAck(ack);
+      log('warn', 'relay.command_simulated_failure', {
+        commandId: command.commandId,
+      });
+      return;
     }
 
     this.enabled = command.payload.state === 'on';

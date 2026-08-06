@@ -6,6 +6,7 @@ import {
 } from '@nestjs/platform-fastify';
 import { configureApi } from './../src/api-setup';
 import { AppModule } from './../src/app.module';
+import { SpikeGateway } from './../src/spike/spike.gateway';
 
 describe('AppController (e2e)', () => {
   let app: NestFastifyApplication;
@@ -13,7 +14,10 @@ describe('AppController (e2e)', () => {
   beforeEach(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(SpikeGateway)
+      .useValue({})
+      .compile();
 
     app = moduleFixture.createNestApplication<NestFastifyApplication>(
       new FastifyAdapter(),

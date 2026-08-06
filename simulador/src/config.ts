@@ -14,6 +14,18 @@ const environmentSchema = z.object({
     })
     .default('mqtts://localhost:8883'),
   MQTT_CA_FILE: z.string().min(1).default('../infra/local/certs/ca.crt'),
+  MQTT_SESSION_EXPIRY_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86_400)
+    .default(3_600),
+  MQTT_RECONNECT_PERIOD_MS: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(60_000)
+    .default(1_000),
   TEMPERATURE_MQTT_CLIENT_ID: z
     .string()
     .min(1)
@@ -55,8 +67,10 @@ const environmentSchema = z.object({
       'invalid-payloads',
       'unstable-network',
       'relay-failures',
+      'burst',
     ])
     .default('normal'),
+  SIMULATION_SEED: z.string().min(1).max(128).default('smart-house'),
 });
 
 export type SimulatorConfig = z.infer<typeof environmentSchema> & {

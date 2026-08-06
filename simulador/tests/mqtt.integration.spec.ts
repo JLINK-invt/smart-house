@@ -183,6 +183,72 @@ describeWithBroker('MQTT simulator integration', () => {
     }
   });
 
+  it('delivers one queued QoS 1 command after the relay reconnects', async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const config = createTestConfig({
+      RELAY_MQTT_CLIENT_ID: `durable-relay-${suffix}`,
+    });
+    const platform = connect(config.MQTT_URL, {
+      clientId: `platform-${suffix}`,
+      ...credentials('platform-worker'),
+    });
+    const acknowledgements: string[] = [];
+    platform.on('message', (topic, payload) => {
+      if (topic === config.relayAcksTopic) {
+        acknowledgements.push(payload.toString('utf8'));
+      }
+    });
+
+    const relayMqtt = new MqttConnection(config, {
+      clientId: config.RELAY_MQTT_CLIENT_ID,
+      certFile: config.RELAY_MQTT_CERT_FILE,
+      keyFile: config.RELAY_MQTT_KEY_FILE,
+      commandTopic: config.relayCommandsTopic,
+    });
+    const relay = new RelayDevice(config, relayMqtt);
+    relayMqtt.setCommandHandler((topic, payload) =>
+      relay.handleCommand(topic, payload),
+    );
+
+    await Promise.all([waitForConnection(platform), relayMqtt.connect()]);
+    await subscribe(platform, config.relayAcksTopic);
+
+    try {
+      await relayMqtt.disconnect();
+      const issuedAt = new Date();
+      const commandId = `queued-${suffix}`;
+      await publish(
+        platform,
+        config.relayCommandsTopic,
+        JSON.stringify({
+          commandId,
+          nonce: `nonce-${suffix}`,
+          tenantId: 'demo',
+          deviceId: 'relay-001',
+          commandType: 'relay.set',
+          issuedAt: issuedAt.toISOString(),
+          expiresAt: new Date(issuedAt.getTime() + 30_000).toISOString(),
+          payload: { state: 'on' },
+        }),
+      );
+
+      await relayMqtt.connect();
+      await waitUntil(() => acknowledgements.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect(acknowledgements).toHaveLength(1);
+      expect(
+        commandAckSchema.parse(JSON.parse(acknowledgements[0])),
+      ).toMatchObject({
+        commandId,
+        status: 'acknowledged',
+        result: { state: 'on' },
+      });
+    } finally {
+      await Promise.all([relayMqtt.disconnect(), disconnect(platform)]);
+    }
+  });
+
   it('denies a device access to another device topic', async () => {
     const suffix = randomUUID().slice(0, 8);
     const temp = connect('mqtts://localhost:8883', {

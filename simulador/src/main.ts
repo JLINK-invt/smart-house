@@ -11,6 +11,7 @@ async function bootstrap(): Promise<void> {
   const profileEngine = new ProfileEngine(
     config.ENABLE_SIMULATION_PROFILES,
     config.SIMULATION_PROFILE,
+    config.SIMULATION_SEED,
   );
   const temperatureMqtt = new MqttConnection(config, {
     clientId: config.TEMPERATURE_MQTT_CLIENT_ID,
@@ -23,8 +24,23 @@ async function bootstrap(): Promise<void> {
     keyFile: config.RELAY_MQTT_KEY_FILE,
     commandTopic: config.relayCommandsTopic,
   });
-  const temperatureSensor = new TemperatureSensor(config, temperatureMqtt);
-  const relay = new RelayDevice(config, relayMqtt);
+  const temperatureSensor = new TemperatureSensor(
+    config,
+    temperatureMqtt,
+    undefined,
+    undefined,
+    undefined,
+    profileEngine,
+    temperatureMqtt,
+  );
+  const relay = new RelayDevice(
+    config,
+    relayMqtt,
+    undefined,
+    undefined,
+    undefined,
+    profileEngine,
+  );
 
   relayMqtt.setCommandHandler((topic, payload) =>
     relay.handleCommand(topic, payload),

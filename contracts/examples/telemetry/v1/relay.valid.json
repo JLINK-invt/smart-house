@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "messageId": "msg-relay-001-example-000001",
+  "deviceId": "relay-001",
+  "tenantId": "demo",
+  "occurredAt": "2026-08-06T12:00:00-06:00",
+  "deviceType": "relay",
+  "metrics": {
+    "relayState": { "value": true, "unit": "boolean" }
+  }
+}

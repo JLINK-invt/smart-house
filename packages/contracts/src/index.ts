@@ -2,8 +2,11 @@ export { healthResponseSchema, type HealthResponse } from './health';
 export { apiErrorSchema, type ApiError } from './http';
 export {
   commandAckSchema,
+  maxTelemetryPayloadBytes,
+  parseTelemetryPayload,
   relayTelemetrySchema,
   telemetrySchema,
+  telemetrySchemaVersion,
   temperatureTelemetrySchema,
   type CommandAck,
   type RelayTelemetry,
