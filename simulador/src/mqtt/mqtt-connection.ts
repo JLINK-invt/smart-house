@@ -41,10 +41,14 @@ export class MqttConnection implements MqttPublisher {
       cert: readFileSync(this.identity.certFile),
       key: readFileSync(this.identity.keyFile),
       rejectUnauthorized: true,
-      clean: true,
-      reconnectPeriod: 1_000,
+      protocolVersion: 5,
+      clean: false,
+      properties: {
+        sessionExpiryInterval: this.config.MQTT_SESSION_EXPIRY_SECONDS,
+      },
+      reconnectPeriod: this.config.MQTT_RECONNECT_PERIOD_MS,
       connectTimeout: 10_000,
-      resubscribe: true,
+      resubscribe: false,
     };
     const client = connectMqtt(this.config.MQTT_URL, options);
     this.client = client;
@@ -71,7 +75,7 @@ export class MqttConnection implements MqttPublisher {
       });
     });
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       let initialConnection = true;
 
       client.on('connect', () => {
@@ -83,12 +87,17 @@ export class MqttConnection implements MqttPublisher {
           }
           return;
         }
+        // Re-subscribing is idempotent and recovers a broker-restarted session.
         client.subscribe(commandTopic, { qos: 1 }, (error) => {
           if (error) {
             log('error', 'mqtt.subscription_failed', {
               message: error.message,
               topic: commandTopic,
             });
+            if (initialConnection) {
+              initialConnection = false;
+              reject(error);
+            }
             return;
           }
 
@@ -143,5 +152,12 @@ export class MqttConnection implements MqttPublisher {
       }),
     );
     log('info', 'mqtt.disconnected');
+  }
+
+  async reconnectAfter(delayMs: number): Promise<void> {
+    await this.disconnect();
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await this.connect();
+    log('info', 'mqtt.reconnected_after_profile_disconnect', { delayMs });
   }
 }

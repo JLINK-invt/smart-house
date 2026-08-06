@@ -9,6 +9,7 @@ describe('simulation profiles', () => {
       'invalid-payloads',
       'unstable-network',
       'relay-failures',
+      'burst',
     ]);
   });
 
@@ -17,5 +18,14 @@ describe('simulation profiles', () => {
 
     expect(engine.selectedProfile().disconnectEveryMessages).toBe(5);
     expect(engine.activeProfile()).toBeNull();
+  });
+
+  it('makes profile decisions reproducible from the profile and seed', () => {
+    const first = new ProfileEngine(true, 'duplicate-messages', 'load-seed');
+    const second = new ProfileEngine(true, 'duplicate-messages', 'load-seed');
+
+    expect(
+      Array.from({ length: 8 }, () => first.nextTelemetryDecision()),
+    ).toEqual(Array.from({ length: 8 }, () => second.nextTelemetryDecision()));
   });
 });

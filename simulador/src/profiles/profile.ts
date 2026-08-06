@@ -3,7 +3,8 @@ export type SimulationProfileName =
   | 'duplicate-messages'
   | 'invalid-payloads'
   | 'unstable-network'
-  | 'relay-failures';
+  | 'relay-failures'
+  | 'burst';
 
 export interface SimulationProfile {
   name: SimulationProfileName;
@@ -18,4 +19,6 @@ export interface SimulationProfile {
   reconnectAfterMs: number;
   relayCommandDelayMs: number;
   relayFailureRate: number;
+  burstRate: number;
+  burstSize: number;
 }

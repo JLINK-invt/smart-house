@@ -8,6 +8,7 @@ import { IdentityService } from '../identity/identity.service';
 import { OrganizationsService } from '../organizations/organizations.service';
 
 type PersistedTelemetryEvent = {
+  eventId: string;
   correlationId: string;
   metric: string;
   organizationId: string;

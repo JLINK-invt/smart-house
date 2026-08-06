@@ -10,6 +10,10 @@ export interface MqttPublisher {
   ): Promise<void>;
 }
 
+export interface MqttReconnectController {
+  reconnectAfter(delayMs: number): Promise<void>;
+}
+
 export type MqttCommandHandler = (
   topic: string,
   payload: Buffer,

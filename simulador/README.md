@@ -55,8 +55,9 @@ Consulta `.env.example`. Los valores principales son:
 | `PUBLISH_INTERVAL_MS` | `30000` | Intervalo de temperatura |
 | `COMMAND_PROCESSING_DELAY_MS` | `100` | Latencia artificial del relay |
 | `PUBLISH_ONCE` | `false` | Publica una lectura y termina |
-| `ENABLE_SIMULATION_PROFILES` | `false` | Seleccion de perfil preparada |
+| `ENABLE_SIMULATION_PROFILES` | `false` | Aplica el perfil seleccionado |
 | `SIMULATION_PROFILE` | `normal` | Perfil seleccionado |
+| `SIMULATION_SEED` | `smart-house` | Semilla reproducible para decisiones del perfil |
 
 El proceso carga automáticamente `simulador/.env` cuando se ejecuta desde esta carpeta. No guardes credenciales reales en ese archivo.
 
@@ -95,17 +96,28 @@ docker compose -f simulador/docker-compose.yml exec -T mqtt mosquitto_sub \
 
 El relay valida el contrato, tenant, dispositivo y expiracion. Un `commandId` repetido no vuelve a cambiar el estado: se republica el ACK anterior.
 
-## Perfiles preparados
+## Perfiles de simulacion
 
-El registro y el motor de perfiles estan creados, pero permanecen desactivados por defecto y todavia no alteran el flujo de los dispositivos.
+Los perfiles permanecen desactivados por defecto, por lo que el flujo normal conserva telemetria valida, QoS 1, mTLS/ACL y la idempotencia del relay. Al habilitarlos, afectan el trafico real del simulador. Con el mismo perfil y `SIMULATION_SEED`, las decisiones aleatorias son reproducibles.
 
-| Perfil | Comportamiento preparado |
+Desde la raiz del repositorio:
+
+```bash
+ENABLE_SIMULATION_PROFILES=true SIMULATION_PROFILE=duplicate-messages SIMULATION_SEED=load-01 pnpm simulator
+ENABLE_SIMULATION_PROFILES=true SIMULATION_PROFILE=invalid-payloads SIMULATION_SEED=load-01 pnpm simulator
+ENABLE_SIMULATION_PROFILES=true SIMULATION_PROFILE=unstable-network SIMULATION_SEED=load-01 pnpm simulator
+ENABLE_SIMULATION_PROFILES=true SIMULATION_PROFILE=relay-failures SIMULATION_SEED=load-01 pnpm simulator
+ENABLE_SIMULATION_PROFILES=true SIMULATION_PROFILE=burst SIMULATION_SEED=load-01 PUBLISH_INTERVAL_MS=100 pnpm simulator
+```
+
+| Perfil | Comportamiento |
 | --- | --- |
-| `normal` | Trafico estable |
-| `duplicate-messages` | Mensajes MQTT duplicados |
-| `invalid-payloads` | Payloads invalidos |
-| `unstable-network` | Desconexion y reconexion |
-| `relay-failures` | Latencia y fallos del relay |
+| `normal` | Trafico estable y telemetria valida |
+| `duplicate-messages` | Duplica de forma determinista parte de la telemetria MQTT |
+| `invalid-payloads` | Emite payloads MQTT JSON malformados de forma controlada |
+| `unstable-network` | Desconecta y reconecta el sensor cada cinco ciclos |
+| `relay-failures` | Retarda comandos y responde ACK fallido de forma controlada |
+| `burst` | Publica 20 mensajes validos QoS 1 por ciclo para carga |
 
 ## Pruebas
 

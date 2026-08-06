@@ -17,8 +17,14 @@ Los servicios de este directorio son exclusivos para desarrollo local. Mosquitto
 pnpm mqtt:certs
 pnpm infra:up
 pnpm db:migrate
+pnpm db:verify:telemetry
 pnpm infra:down
 ```
+
+`pnpm db:verify:telemetry` valida las políticas de retención y agregación de
+TimescaleDB, los resultados y planes de consultas históricas y el objetivo local
+de latencia de 500 ms. Usa IDs aislados y elimina los datos y agregados de prueba
+al terminar; vuelve a ejecutar el comando para limpiar una ejecución interrumpida.
 
 ## MQTT mTLS y ACL
 

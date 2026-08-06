@@ -20,9 +20,41 @@ channels:
       temperature:
         payload:
           $ref: '#/components/schemas/TemperatureTelemetry'
+        examples:
+          - name: temperature-v1
+            payload:
+              schemaVersion: '1.0'
+              messageId: msg-temp-001-example-000001
+              deviceId: temp-001
+              tenantId: demo
+              occurredAt: '2026-08-06T12:00:00.000Z'
+              deviceType: temperature_sensor
+              metrics:
+                temperature: { value: 24.1, unit: celsius }
+          - name: temperature-fahrenheit-v1
+            payload:
+              schemaVersion: '1.0'
+              messageId: msg-temp-001-fahrenheit-000001
+              deviceId: temp-001
+              tenantId: demo
+              occurredAt: '2026-08-06T12:00:00.000Z'
+              deviceType: temperature_sensor
+              metrics:
+                temperature: { value: 75.2, unit: fahrenheit }
       relay:
         payload:
           $ref: '#/components/schemas/RelayTelemetry'
+        examples:
+          - name: relay-v1
+            payload:
+              schemaVersion: '1.0'
+              messageId: msg-relay-001-example-000001
+              deviceId: relay-001
+              tenantId: demo
+              occurredAt: '2026-08-06T12:00:00-06:00'
+              deviceType: relay
+              metrics:
+                relayState: { value: true, unit: boolean }
 operations:
   publishTelemetry:
     action: receive
@@ -32,11 +64,12 @@ components:
   schemas:
     TelemetryBase:
       type: object
-      required: [messageId, deviceId, tenantId, occurredAt]
+      required: [schemaVersion, messageId, deviceId, tenantId, occurredAt]
       properties:
-        messageId: { type: string }
-        deviceId: { type: string }
-        tenantId: { type: string }
+        schemaVersion: { type: string, const: '1.0' }
+        messageId: { type: string, minLength: 1, maxLength: 128 }
+        deviceId: { type: string, minLength: 1, maxLength: 128 }
+        tenantId: { type: string, minLength: 1, maxLength: 64 }
         occurredAt: { type: string, format: date-time }
     TemperatureTelemetry:
       allOf:
@@ -47,12 +80,23 @@ components:
             deviceType: { const: temperature_sensor }
             metrics:
               type: object
+              additionalProperties: false
+              required: [temperature]
               properties:
                 temperature:
-                  type: object
-                  properties:
-                    value: { type: number }
-                    unit: { const: celsius }
+                  oneOf:
+                    - type: object
+                      additionalProperties: false
+                      required: [value, unit]
+                      properties:
+                        value: { type: number, minimum: -50, maximum: 100 }
+                        unit: { const: celsius }
+                    - type: object
+                      additionalProperties: false
+                      required: [value, unit]
+                      properties:
+                        value: { type: number, minimum: -58, maximum: 212 }
+                        unit: { const: fahrenheit }
     RelayTelemetry:
       allOf:
         - $ref: '#/components/schemas/TelemetryBase'
@@ -62,9 +106,13 @@ components:
             deviceType: { const: relay }
             metrics:
               type: object
+              additionalProperties: false
+              required: [relayState]
               properties:
                 relayState:
                   type: object
+                  additionalProperties: false
+                  required: [value, unit]
                   properties:
                     value: { type: boolean }
                     unit: { const: boolean }
