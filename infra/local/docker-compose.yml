@@ -65,6 +65,7 @@ services:
       - "8080:8080"
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
+      - keycloak-data:/opt/keycloak/data
 
   mailpit:
     image: axllent/mailpit:v1.20.3
@@ -76,3 +77,4 @@ volumes:
   postgres-data:
   redis-data:
   mqtt-data:
+  keycloak-data:

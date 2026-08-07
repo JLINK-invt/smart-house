@@ -63,7 +63,9 @@ un proveedor de identidad que exponga revocación dinámica). Ese mecanismo qued
 fuera del entorno local actual; hasta entonces, rota el certificado y reinicia
 Mosquitto al retirar una identidad local.
 
-Los volúmenes persisten entre reinicios. Para borrar datos locales, ejecuta `docker compose -f infra/local/docker-compose.yml down --volumes`.
+Los volúmenes de PostgreSQL, Redis, Mosquitto y Keycloak persisten entre
+reinicios y `pnpm infra:down`. Para borrar datos locales, incluidas las cuentas
+de Keycloak, ejecuta `docker compose -f infra/local/docker-compose.yml down --volumes`.
 
 # Infraestructura local
 

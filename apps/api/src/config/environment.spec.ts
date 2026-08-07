@@ -5,6 +5,7 @@ describe('readEnvironment', () => {
     expect(readEnvironment({})).toMatchObject({
       NODE_ENV: 'development',
       PORT: 4000,
+      WEB_ORIGIN: 'http://localhost:3000',
     });
   });
 

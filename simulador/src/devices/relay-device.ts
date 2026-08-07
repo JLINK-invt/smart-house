@@ -19,6 +19,7 @@ const MAX_REMEMBERED_COMMANDS = 1_000;
 export class RelayDevice {
   private enabled = false;
   private readonly processedCommands = new Map<string, CommandAck>();
+  private readonly inFlightCommands = new Map<string, Promise<void>>();
 
   constructor(
     private readonly config: SimulatorConfig,
@@ -98,6 +99,14 @@ export class RelayDevice {
       return;
     }
 
+    const inFlight = this.inFlightCommands.get(command.commandId);
+    if (inFlight) {
+      // QoS 1 can redeliver before the first execution has reached its ACK.
+      await inFlight;
+      log('info', 'relay.command_duplicate', { commandId: command.commandId });
+      return;
+    }
+
     if (new Date(command.expiresAt).getTime() <= this.now().getTime()) {
       const ack = this.createFailureAck(
         command.commandId,
@@ -109,7 +118,13 @@ export class RelayDevice {
       return;
     }
 
-    await this.execute(command);
+    const execution = this.execute(command);
+    this.inFlightCommands.set(command.commandId, execution);
+    try {
+      await execution;
+    } finally {
+      this.inFlightCommands.delete(command.commandId);
+    }
   }
 
   async publishState(): Promise<RelayTelemetry> {

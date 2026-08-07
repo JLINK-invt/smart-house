@@ -15,6 +15,13 @@ const environmentSchema = z.object({
     .url()
     .default('http://localhost:8080/realms/smart-house'),
   KEYCLOAK_AUDIENCE: z.string().min(1).default('smart-house-web'),
+  WEB_ORIGIN: z.string().url().default('http://localhost:3000'),
+  TELEMETRY_EXPORT_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
+  TELEMETRY_EXPORT_RATE_WINDOW_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .default(60_000),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

@@ -6,21 +6,50 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import { Readable } from 'node:stream';
+import type { FastifyReply } from 'fastify';
 import {
   BearerAuthGuard,
   type AuthenticatedRequest,
 } from '../identity/bearer-auth.guard';
 import {
   DevicesService,
+  type DeviceTelemetryQuery,
+  type DeviceListQuery,
   type DeviceInput,
   type DeviceUpdate,
 } from './devices.service';
 
 type DeviceBody = Partial<DeviceInput>;
 type CommandBody = { type?: string; payload?: unknown };
+type DeviceListQueryParams = Record<string, string | string[] | undefined>;
+
+export function csvCell(value: string | number | null | undefined): string {
+  let text = value === null || value === undefined ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+export function telemetryCsv(
+  telemetry: Awaited<ReturnType<DevicesService['exportTelemetry']>>,
+): Readable {
+  return Readable.from(
+    (function* () {
+      yield 'occurredAt,metric,value,unit\r\n';
+      for (const point of telemetry.points) {
+        yield [point.occurredAt, telemetry.metric, point.value, point.unit]
+          .map(csvCell)
+          .join(',')
+          .concat('\r\n');
+      }
+    })(),
+  );
+}
 
 @Controller('organizations/:organizationId/devices')
 @UseGuards(BearerAuthGuard)
@@ -31,8 +60,13 @@ export class DevicesController {
   list(
     @Req() request: AuthenticatedRequest,
     @Param('organizationId') organizationId: string,
+    @Query() query: DeviceListQueryParams,
   ) {
-    return this.devices.list(request.identity, organizationId);
+    return this.devices.list(
+      request.identity,
+      organizationId,
+      this.listQuery(query),
+    );
   }
 
   @Get('capability-catalog')
@@ -54,6 +88,41 @@ export class DevicesController {
       organizationId,
       this.createInput(body),
     );
+  }
+
+  @Get(':deviceId/telemetry')
+  telemetry(
+    @Req() request: AuthenticatedRequest,
+    @Param('organizationId') organizationId: string,
+    @Param('deviceId') deviceId: string,
+    @Query() query: DeviceListQueryParams,
+  ) {
+    return this.devices.telemetry(
+      request.identity,
+      organizationId,
+      deviceId,
+      this.telemetryQuery(query),
+    );
+  }
+
+  @Get(':deviceId/telemetry/export.csv')
+  async exportTelemetry(
+    @Req() request: AuthenticatedRequest,
+    @Param('organizationId') organizationId: string,
+    @Param('deviceId') deviceId: string,
+    @Query() query: DeviceListQueryParams,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const telemetry = await this.devices.exportTelemetry(
+      request.identity,
+      organizationId,
+      deviceId,
+      this.telemetryQuery(query),
+    );
+    reply
+      .header('content-disposition', 'attachment; filename="telemetry.csv"')
+      .type('text/csv; charset=utf-8')
+      .send(telemetryCsv(telemetry));
   }
 
   @Get(':deviceId')
@@ -201,5 +270,93 @@ export class DevicesController {
       }
     }
     return input;
+  }
+
+  private listQuery(query: DeviceListQueryParams): DeviceListQuery {
+    const value = (name: string) => {
+      const parameter = query[name];
+      if (parameter === undefined) return undefined;
+      if (typeof parameter !== 'string') {
+        throw new BadRequestException(`${name} must be a single value.`);
+      }
+      return parameter.trim();
+    };
+    const q = value('q');
+    const status = value('status');
+    const type = value('type');
+    const cursor = value('cursor');
+    const limit = value('limit');
+
+    if (q && q.length > 200) {
+      throw new BadRequestException('q must be at most 200 characters.');
+    }
+    if (type && type.length > 100) {
+      throw new BadRequestException('type must be at most 100 characters.');
+    }
+    if (
+      status &&
+      !['inactive', 'offline', 'online', 'disabled'].includes(status)
+    ) {
+      throw new BadRequestException('status is invalid.');
+    }
+    if (cursor && cursor.length > 1_000) {
+      throw new BadRequestException('cursor is invalid.');
+    }
+    if (
+      limit &&
+      (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)
+    ) {
+      throw new BadRequestException(
+        'limit must be an integer between 1 and 100.',
+      );
+    }
+
+    return {
+      q: q || undefined,
+      status: status as DeviceListQuery['status'] | undefined,
+      type: type || undefined,
+      cursor: cursor || undefined,
+      limit: limit ? Number(limit) : undefined,
+    };
+  }
+
+  private telemetryQuery(query: DeviceListQueryParams): DeviceTelemetryQuery {
+    const value = (name: string) => {
+      const parameter = query[name];
+      if (typeof parameter !== 'string') {
+        throw new BadRequestException(
+          `${name} is required and must be a single value.`,
+        );
+      }
+      return parameter.trim();
+    };
+    const metric = value('metric');
+    const from = new Date(value('from'));
+    const to = new Date(value('to'));
+    const resolution = value('resolution');
+
+    if (!metric || metric.length > 128) {
+      throw new BadRequestException(
+        'metric must be between 1 and 128 characters.',
+      );
+    }
+    if (
+      Number.isNaN(from.getTime()) ||
+      Number.isNaN(to.getTime()) ||
+      from >= to
+    ) {
+      throw new BadRequestException(
+        'from and to must be valid ascending ISO timestamps.',
+      );
+    }
+    if (!['auto', 'raw', '5m', '1h'].includes(resolution)) {
+      throw new BadRequestException('resolution must be auto, raw, 5m, or 1h.');
+    }
+    return {
+      metric,
+      from,
+      to,
+      resolution: resolution as DeviceTelemetryQuery['resolution'],
+    };
   }
 }

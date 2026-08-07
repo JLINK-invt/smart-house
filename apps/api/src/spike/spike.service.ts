@@ -2,6 +2,8 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import type { LatestTelemetry } from '@smart-house/contracts';
 import { Pool } from 'pg';
 import { readEnvironment } from '../config/environment';
+import type { Identity } from '../identity/identity.service';
+import { OrganizationsService } from '../organizations/organizations.service';
 
 @Injectable()
 export class SpikeService implements OnModuleDestroy {
@@ -9,11 +11,15 @@ export class SpikeService implements OnModuleDestroy {
     connectionString: readEnvironment(process.env).DATABASE_URL,
   });
 
+  constructor(private readonly organizations: OrganizationsService) {}
+
   async onModuleDestroy(): Promise<void> {
     await this.database.end();
   }
 
-  async getLatestTelemetry(subject: string): Promise<LatestTelemetry> {
+  async getLatestTelemetry(identity: Identity): Promise<LatestTelemetry> {
+    // The dashboard is the first authenticated API call for a new account.
+    await this.organizations.list(identity);
     const result = await this.database.query<{
       correlation_id: string;
       device_id: string;
@@ -31,7 +37,7 @@ export class SpikeService implements OnModuleDestroy {
        JOIN users member ON member.id = m.user_id
        WHERE member.subject = $1 AND m.status = 'active'
        ORDER BY d.external_id, t.metric, t.occurred_at DESC`,
-      [subject],
+      [identity.subject],
     );
 
     return result.rows.map((row) => ({

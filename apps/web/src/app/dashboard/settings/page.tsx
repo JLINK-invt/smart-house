@@ -1,17 +1,31 @@
 import { cookies } from "next/headers";
 import { addMember, createOrganization } from "./actions";
 import { accessTokenCookie } from "@/lib/auth";
-import { getOrganizationMembers, getOrganizations } from "@/lib/api";
+import {
+  getOrganizationMembers,
+  getOrganizations,
+  type Organization,
+  type OrganizationMember,
+} from "@/lib/api";
+import { redirectExpiredSession } from "@/lib/session";
 
 export default async function SettingsPage() {
   const accessToken = (await cookies()).get(accessTokenCookie)?.value ?? "";
-  const organizations = await getOrganizations(accessToken);
-  const membersByOrganization = await Promise.all(
-    organizations.map(async (organization) => ({
-      organization,
-      members: await getOrganizationMembers(accessToken, organization.id),
-    })),
-  );
+  let membersByOrganization: {
+    organization: Organization;
+    members: OrganizationMember[];
+  }[];
+  try {
+    const organizations = await getOrganizations(accessToken);
+    membersByOrganization = await Promise.all(
+      organizations.map(async (organization) => ({
+        organization,
+        members: await getOrganizationMembers(accessToken, organization.id),
+      })),
+    );
+  } catch (error) {
+    redirectExpiredSession(error);
+  }
 
   return (
     <section className="feature-page organization-page">

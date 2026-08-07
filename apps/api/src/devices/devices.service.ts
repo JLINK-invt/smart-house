@@ -2,6 +2,8 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  HttpException,
+  HttpStatus,
   NotFoundException,
   OnModuleDestroy,
 } from '@nestjs/common';
@@ -20,6 +22,43 @@ export type DeviceInput = {
 
 export type DeviceUpdate = Partial<DeviceInput>;
 
+export type DeviceListQuery = {
+  q?: string;
+  status?: 'inactive' | 'offline' | 'online' | 'disabled';
+  type?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+export type TelemetryResolution = 'auto' | 'raw' | '5m' | '1h';
+
+export type DeviceTelemetryQuery = {
+  metric: string;
+  from: Date;
+  to: Date;
+  resolution: TelemetryResolution;
+};
+
+export type TelemetryPoint = {
+  occurredAt: string;
+  value: number;
+  unit: string;
+};
+
+export type DeviceTelemetry = {
+  metric: string;
+  resolution: Exclude<TelemetryResolution, 'auto'>;
+  points: TelemetryPoint[];
+};
+
+export type DeviceTelemetryExport = {
+  metric: string;
+  resolution: Exclude<TelemetryResolution, 'auto'>;
+  points: TelemetryPoint[];
+};
+
+export const TELEMETRY_EXPORT_ROW_LIMIT = 10_000;
+
 type Device = DeviceInput & {
   id: string;
   status: string;
@@ -27,6 +66,13 @@ type Device = DeviceInput & {
   createdAt: string;
   updatedAt: string;
 };
+
+export type DeviceList = {
+  items: Device[];
+  nextCursor: string | null;
+};
+
+type DeviceCursor = Pick<Device, 'name' | 'externalId' | 'id'>;
 
 type CapabilityCatalog = {
   type: string;
@@ -55,6 +101,7 @@ export type CredentialMetadata = {
 
 @Injectable()
 export class DevicesService implements OnModuleDestroy {
+  private readonly exportAttempts = new Map<string, number[]>();
   private readonly database = new Pool({
     connectionString: readEnvironment(process.env).DATABASE_URL,
   });
@@ -65,16 +112,55 @@ export class DevicesService implements OnModuleDestroy {
     await this.database.end();
   }
 
-  async list(identity: Identity, organizationId: string): Promise<Device[]> {
+  async list(
+    identity: Identity,
+    organizationId: string,
+    filters: DeviceListQuery = {},
+  ): Promise<DeviceList> {
     await this.organizations.requireMembership(identity, organizationId);
+    const values: unknown[] = [organizationId];
+    const where = ['organization_id = $1'];
+    const add = (clause: string, value: unknown) => {
+      values.push(value);
+      where.push(clause.replace('?', `$${values.length}`));
+    };
+
+    if (filters.q) {
+      values.push(filters.q);
+      const parameter = `$${values.length}`;
+      where.push(
+        `(name ILIKE '%' || ${parameter} || '%' OR external_id ILIKE '%' || ${parameter} || '%')`,
+      );
+    }
+    if (filters.status) add('status = ?', filters.status);
+    if (filters.type) add('type = ?', filters.type);
+    if (filters.cursor) {
+      const cursor = this.decodeCursor(filters.cursor);
+      values.push(cursor.name, cursor.externalId, cursor.id);
+      const firstParameter = values.length - 2;
+      where.push(
+        `(name, external_id, id) > ($${firstParameter}, $${firstParameter + 1}, $${firstParameter + 2})`,
+      );
+    }
+
+    const limit = filters.limit ?? 25;
+    values.push(limit + 1);
     const result = await this.database.query<Device>(
       `SELECT id, external_id AS "externalId", name, type,
-              capability_version AS "capabilityVersion", status,
-              last_seen_at AS "lastSeenAt", created_at AS "createdAt", updated_at AS "updatedAt"
-       FROM devices WHERE organization_id = $1 ORDER BY name, external_id`,
-      [organizationId],
+               capability_version AS "capabilityVersion", status,
+               last_seen_at AS "lastSeenAt", created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM devices WHERE ${where.join(' AND ')}
+       ORDER BY name, external_id, id
+       LIMIT $${values.length}`,
+      values,
     );
-    return result.rows;
+    const hasMore = result.rows.length > limit;
+    const items = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const lastItem = items.at(-1);
+    return {
+      items,
+      nextCursor: hasMore && lastItem ? this.encodeCursor(lastItem) : null,
+    };
   }
 
   async catalog(
@@ -96,6 +182,114 @@ export class DevicesService implements OnModuleDestroy {
   ): Promise<Device> {
     await this.organizations.requireMembership(identity, organizationId);
     return this.find(organizationId, deviceId);
+  }
+
+  async telemetry(
+    identity: Identity,
+    organizationId: string,
+    deviceId: string,
+    query: DeviceTelemetryQuery,
+  ): Promise<DeviceTelemetry> {
+    await this.organizations.requireMembership(identity, organizationId);
+    await this.find(organizationId, deviceId);
+
+    const resolution = this.resolveTelemetryResolution(query);
+    const result = await this.database.query<{
+      occurredAt: Date | string;
+      value: number;
+      unit: string;
+    }>(this.telemetrySql(query.metric, resolution), [
+      organizationId,
+      deviceId,
+      query.metric,
+      query.from,
+      query.to,
+    ]);
+
+    return {
+      metric: query.metric,
+      resolution,
+      points: result.rows.map((point) => ({
+        ...point,
+        occurredAt:
+          typeof point.occurredAt === 'string'
+            ? new Date(point.occurredAt).toISOString()
+            : point.occurredAt.toISOString(),
+      })),
+    };
+  }
+
+  async exportTelemetry(
+    identity: Identity,
+    organizationId: string,
+    deviceId: string,
+    query: DeviceTelemetryQuery,
+  ): Promise<DeviceTelemetryExport> {
+    await this.organizations.requireMembership(identity, organizationId);
+    await this.find(organizationId, deviceId);
+
+    const resolution = this.resolveTelemetryExportResolution(query);
+    const auditMetadata = {
+      scope: 'organization_device',
+      metric: query.metric,
+      resolution,
+      from: query.from.toISOString(),
+      to: query.to.toISOString(),
+    };
+    if (!this.allowExport(identity.subject)) {
+      await this.writeAudit(
+        organizationId,
+        identity.subject,
+        'device.telemetry.export',
+        'device',
+        deviceId,
+        'denied',
+        { ...auditMetadata, reason: 'rate_limited' },
+      );
+      throw new HttpException(
+        'Telemetry export rate limit exceeded.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const result = await this.database.query<{
+      occurredAt: Date | string;
+      value: number;
+      unit: string;
+    }>(
+      this.telemetrySql(
+        query.metric,
+        resolution,
+        TELEMETRY_EXPORT_ROW_LIMIT + 1,
+      ),
+      [organizationId, deviceId, query.metric, query.from, query.to],
+    );
+    if (result.rows.length > TELEMETRY_EXPORT_ROW_LIMIT) {
+      throw new BadRequestException(
+        `Telemetry export exceeds the ${TELEMETRY_EXPORT_ROW_LIMIT} row limit.`,
+      );
+    }
+
+    await this.writeAudit(
+      organizationId,
+      identity.subject,
+      'device.telemetry.export',
+      'device',
+      deviceId,
+      'allowed',
+      { ...auditMetadata, rowCount: result.rows.length },
+    );
+    return {
+      metric: query.metric,
+      resolution,
+      points: result.rows.map((point) => ({
+        ...point,
+        occurredAt:
+          typeof point.occurredAt === 'string'
+            ? new Date(point.occurredAt).toISOString()
+            : point.occurredAt.toISOString(),
+      })),
+    };
   }
 
   async create(
@@ -450,8 +644,178 @@ export class DevicesService implements OnModuleDestroy {
     }
   }
 
+  private resolveTelemetryResolution(
+    query: DeviceTelemetryQuery,
+  ): Exclude<TelemetryResolution, 'auto'> {
+    const rangeMilliseconds = query.to.getTime() - query.from.getTime();
+    const ranges = {
+      raw: 24 * 60 * 60 * 1_000,
+      '5m': 31 * 24 * 60 * 60 * 1_000,
+      '1h': 2 * 365 * 24 * 60 * 60 * 1_000,
+    } as const;
+    const requested = query.resolution;
+    const resolution =
+      requested === 'auto'
+        ? rangeMilliseconds <= ranges.raw
+          ? 'raw'
+          : rangeMilliseconds <= ranges['5m']
+            ? '5m'
+            : '1h'
+        : requested;
+
+    if (rangeMilliseconds > ranges[resolution]) {
+      throw new BadRequestException(
+        `The requested ${resolution} resolution does not support this range.`,
+      );
+    }
+    return resolution;
+  }
+
+  private resolveTelemetryExportResolution(
+    query: DeviceTelemetryQuery,
+  ): Exclude<TelemetryResolution, 'auto'> {
+    const resolution = this.resolveTelemetryResolution(query);
+    const ranges = {
+      raw: 60 * 60 * 1_000,
+      '5m': 7 * 24 * 60 * 60 * 1_000,
+      '1h': 90 * 24 * 60 * 60 * 1_000,
+    } as const;
+    if (query.to.getTime() - query.from.getTime() > ranges[resolution]) {
+      throw new BadRequestException(
+        `Telemetry export at ${resolution} resolution exceeds its maximum range.`,
+      );
+    }
+    return resolution;
+  }
+
+  private telemetrySql(
+    metric: string,
+    resolution: Exclude<TelemetryResolution, 'auto'>,
+    limit?: number,
+  ): string {
+    const rowLimit = limit ? ` LIMIT ${limit}` : '';
+    if (resolution === 'raw') {
+      return `SELECT occurred_at AS "occurredAt", value, unit
+              FROM telemetry_records
+              WHERE organization_id = $1 AND device_id = $2 AND metric = $3
+                AND occurred_at >= $4 AND occurred_at <= $5
+               ORDER BY occurred_at${rowLimit}`;
+    }
+
+    if (metric === 'temperature') {
+      if (resolution === '5m') {
+        return `SELECT bucket AS "occurredAt", avg_temperature_celsius AS value, 'celsius' AS unit
+                FROM telemetry_temperature_5m
+                WHERE organization_id = $1 AND device_id = $2
+                  AND bucket >= $4
+                  AND bucket < time_bucket('5 minutes', LEAST($5, now() - interval '5 minutes'))
+                UNION ALL
+                SELECT occurred_at AS "occurredAt", value, unit
+                FROM telemetry_records
+                WHERE organization_id = $1 AND device_id = $2 AND metric = $3
+                  AND occurred_at >= GREATEST($4, time_bucket('5 minutes', now() - interval '5 minutes'))
+                  AND occurred_at <= $5
+                 ORDER BY "occurredAt"${rowLimit}`;
+      }
+      return `SELECT bucket AS "occurredAt", avg_temperature_celsius AS value, 'celsius' AS unit
+              FROM telemetry_temperature_1h
+              WHERE organization_id = $1 AND device_id = $2
+                AND bucket >= $4
+                AND bucket < time_bucket('1 hour', LEAST($5, now() - interval '1 hour'))
+              UNION ALL
+              SELECT occurred_at AS "occurredAt", value, unit
+              FROM telemetry_records
+              WHERE organization_id = $1 AND device_id = $2 AND metric = $3
+                AND occurred_at >= GREATEST($4, time_bucket('1 hour', now() - interval '1 hour'))
+                AND occurred_at <= $5
+               ORDER BY "occurredAt"${rowLimit}`;
+    }
+
+    if (metric === 'relayState') {
+      if (resolution === '5m') {
+        return `SELECT last_sample_at AS "occurredAt", last_state::double precision AS value, 'boolean' AS unit
+                FROM telemetry_relay_5m
+                WHERE organization_id = $1 AND device_id = $2
+                  AND bucket >= $4
+                  AND bucket < time_bucket('5 minutes', LEAST($5, now() - interval '5 minutes'))
+                UNION ALL
+                SELECT occurred_at AS "occurredAt", value, unit
+                FROM telemetry_records
+                WHERE organization_id = $1 AND device_id = $2 AND metric = $3
+                  AND occurred_at >= GREATEST($4, time_bucket('5 minutes', now() - interval '5 minutes'))
+                  AND occurred_at <= $5
+                 ORDER BY "occurredAt"${rowLimit}`;
+      }
+      return `SELECT last_sample_at AS "occurredAt", last_state::double precision AS value, 'boolean' AS unit
+              FROM telemetry_relay_1h
+              WHERE organization_id = $1 AND device_id = $2
+                AND bucket >= $4
+                AND bucket < time_bucket('1 hour', LEAST($5, now() - interval '1 hour'))
+              UNION ALL
+              SELECT occurred_at AS "occurredAt", value, unit
+              FROM telemetry_records
+              WHERE organization_id = $1 AND device_id = $2 AND metric = $3
+                AND occurred_at >= GREATEST($4, time_bucket('1 hour', now() - interval '1 hour'))
+                AND occurred_at <= $5
+               ORDER BY "occurredAt"${rowLimit}`;
+    }
+
+    throw new BadRequestException(
+      'Aggregated telemetry is only available for temperature and relayState.',
+    );
+  }
+
   private hashToken(token: string): string {
     return createHash('sha256').update(token).digest('hex');
+  }
+
+  private allowExport(subject: string): boolean {
+    const environment = readEnvironment(process.env);
+    const now = Date.now();
+    const windowStart = now - environment.TELEMETRY_EXPORT_RATE_WINDOW_MS;
+    const attempts = (this.exportAttempts.get(subject) ?? []).filter(
+      (attempt) => attempt > windowStart,
+    );
+    if (attempts.length >= environment.TELEMETRY_EXPORT_RATE_LIMIT) {
+      this.exportAttempts.set(subject, attempts);
+      return false;
+    }
+    attempts.push(now);
+    this.exportAttempts.set(subject, attempts);
+    return true;
+  }
+
+  private encodeCursor(device: DeviceCursor): string {
+    return Buffer.from(
+      JSON.stringify({
+        name: device.name,
+        externalId: device.externalId,
+        id: device.id,
+      }),
+    ).toString('base64url');
+  }
+
+  private decodeCursor(cursor: string): DeviceCursor {
+    try {
+      const decoded: unknown = JSON.parse(
+        Buffer.from(cursor, 'base64url').toString('utf8'),
+      );
+      if (
+        !decoded ||
+        typeof decoded !== 'object' ||
+        typeof (decoded as DeviceCursor).name !== 'string' ||
+        typeof (decoded as DeviceCursor).externalId !== 'string' ||
+        typeof (decoded as DeviceCursor).id !== 'string' ||
+        !(decoded as DeviceCursor).name ||
+        !(decoded as DeviceCursor).externalId ||
+        !(decoded as DeviceCursor).id
+      ) {
+        throw new Error('Invalid cursor');
+      }
+      return decoded as DeviceCursor;
+    } catch {
+      throw new BadRequestException('Cursor is invalid.');
+    }
   }
 
   private async writeAudit(

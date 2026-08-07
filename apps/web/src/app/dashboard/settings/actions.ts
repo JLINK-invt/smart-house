@@ -2,6 +2,7 @@
 
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { accessTokenCookie } from "@/lib/auth";
 import { getApiUrl } from "@/lib/config";
 
@@ -14,7 +15,18 @@ async function mutate(path: string, body: unknown) {
     body: JSON.stringify(body),
     cache: "no-store",
   });
-  if (!response.ok) throw new Error("The requested organization change was rejected.");
+  if (response.status === 401) {
+    redirect("/auth/logout?error=session-expired");
+  }
+  if (!response.ok) {
+    const error = await response.json().catch(() => null) as {
+      message?: string | string[];
+    } | null;
+    const message = Array.isArray(error?.message)
+      ? error.message.join(", ")
+      : error?.message;
+    throw new Error(message ?? "The requested organization change was rejected.");
+  }
 }
 
 export async function createOrganization(formData: FormData) {

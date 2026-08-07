@@ -3,6 +3,7 @@ import { getApiUrl } from "@/lib/config";
 import { SpikeLiveTelemetry } from "@/components/spike-live-telemetry";
 import { cookies } from "next/headers";
 import { accessTokenCookie } from "@/lib/auth";
+import { redirectExpiredSession } from "@/lib/session";
 const milestones = [
   { name: "Organizaciones y miembros", state: "Pendiente", detail: "Autenticación, tenancy y roles del MVP." },
   { name: "Dispositivos", state: "Pendiente", detail: "Registro, activación y estado de la flota." },
@@ -12,8 +13,13 @@ const milestones = [
 
 export default async function DashboardPage() {
   const accessToken = (await cookies()).get(accessTokenCookie)?.value ?? "";
-  const [api, telemetry] = await Promise.all([getApiStatus(), getLatestTelemetry(accessToken)]);
-  const temperature = telemetry.find((reading) => reading.metric === "temperature");
+  let api: Awaited<ReturnType<typeof getApiStatus>>;
+  let telemetry: Awaited<ReturnType<typeof getLatestTelemetry>>;
+  try {
+    [api, telemetry] = await Promise.all([getApiStatus(), getLatestTelemetry(accessToken)]);
+  } catch (error) {
+    redirectExpiredSession(error);
+  }
   const relay = telemetry.find((reading) => reading.metric === "relay_state");
 
   return (
@@ -41,18 +47,13 @@ export default async function DashboardPage() {
           <article className="signal-card">
             <span className="aero-kicker">Comandos</span>
             <strong>{relay ? (relay.value === 1 ? "Relay encendido" : "Relay apagado") : "0 pendientes"}</strong>
-            <p>{relay ? `Última muestra: ${relay.correlationId}` : "Los comandos se confirmarán con ACK de cada dispositivo."}</p>
+            <p>{relay ? `Muestra al cargar: ${relay.correlationId}` : "Los comandos se confirmarán con ACK de cada dispositivo."}</p>
           </article>
         </section>
 
       <section className="spike-readings" aria-labelledby="spike-readings-title">
         <div className="section-label"><span>01</span><h2 id="spike-readings-title">Telemetría del spike</h2></div>
-        <div className="feature-grid">
-          <article className="feature-card"><span>Temperatura</span><strong>{temperature ? `${temperature.value} °C` : "-- °C"}</strong><p>{temperature ? `temp-001 · ${temperature.correlationId}` : "Esperando una muestra MQTT persistida."}</p></article>
-          <article className="feature-card"><span>Relay</span><strong>{relay ? (relay.value === 1 ? "ON" : "OFF") : "--"}</strong><p>{relay ? `relay-001 · ${relay.correlationId}` : "Esperando estado del relay."}</p></article>
-          <article className="feature-card"><span>Ruta</span><strong>{telemetry.length > 0 ? "Activa" : "En espera"}</strong><p>MQTT → Worker → PostgreSQL → Redis → API.</p></article>
-        </div>
-        <SpikeLiveTelemetry apiOrigin={getApiUrl()} accessToken={accessToken} />
+        <SpikeLiveTelemetry apiOrigin={getApiUrl()} accessToken={accessToken} initialTelemetry={telemetry} />
       </section>
 
       <section className="milestones" aria-labelledby="milestones-title">

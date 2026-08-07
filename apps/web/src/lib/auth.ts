@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 
 export const accessTokenCookie = "smart-house-access-token";
+export const idTokenCookie = "smart-house-id-token";
 export const pkceVerifierCookie = "smart-house-pkce-verifier";
 export const oidcStateCookie = "smart-house-oidc-state";
 

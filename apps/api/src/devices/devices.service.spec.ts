@@ -1,4 +1,8 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { DevicesService } from './devices.service';
 import type { OrganizationsService } from '../organizations/organizations.service';
 
@@ -38,12 +42,240 @@ describe('DevicesService', () => {
     requireMembership.mockResolvedValue({ role: 'viewer' });
     query.mockResolvedValue({ rows: [device] });
 
-    await expect(service.list(identity, 'organization-1')).resolves.toEqual([
-      device,
-    ]);
+    await expect(service.list(identity, 'organization-1')).resolves.toEqual({
+      items: [device],
+      nextCursor: null,
+    });
 
     expect(requireMembership).toHaveBeenCalledWith(identity, 'organization-1');
-    expect(query).toHaveBeenCalledWith(expect.any(String), ['organization-1']);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('ORDER BY name, external_id, id'),
+      ['organization-1', 26],
+    );
+  });
+
+  it('parameterizes inventory filters and returns a stable next cursor', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query.mockResolvedValue({ rows: [device, { ...device, id: 'device-2' }] });
+
+    const result = await service.list(identity, 'organization-1', {
+      q: "Kitchen' OR true --",
+      status: 'inactive',
+      type: 'relay',
+      limit: 1,
+    });
+
+    expect(result.items).toEqual([device]);
+    expect(result.nextCursor).toEqual(expect.any(String));
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("name ILIKE '%' || $2 || '%'"),
+      ['organization-1', "Kitchen' OR true --", 'inactive', 'relay', 2],
+    );
+    const [[sql]] = query.mock.calls as [string, unknown[]][];
+    expect(sql).not.toContain("Kitchen' OR true --");
+  });
+
+  it('rejects an invalid inventory cursor after confirming membership', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+
+    await expect(
+      service.list(identity, 'organization-1', { cursor: 'not-a-cursor' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('requires membership and scoped device ownership before reading telemetry', async () => {
+    requireMembership.mockRejectedValue(new ForbiddenException());
+
+    await expect(
+      service.telemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T01:00:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(query).not.toHaveBeenCalled();
+
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query.mockResolvedValue({ rows: [] });
+    await expect(
+      service.telemetry(identity, 'organization-1', 'foreign-device', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T01:00:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('WHERE organization_id = $1 AND id = $2'),
+      ['organization-1', 'foreign-device'],
+    );
+  });
+
+  it('uses the raw telemetry table for short ranges', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query.mockResolvedValueOnce({ rows: [device] }).mockResolvedValueOnce({
+      rows: [
+        {
+          occurredAt: new Date('2026-08-06T00:30:00.000Z'),
+          value: 21.5,
+          unit: 'celsius',
+        },
+      ],
+    });
+
+    await expect(
+      service.telemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T01:00:00.000Z'),
+        resolution: 'auto',
+      }),
+    ).resolves.toMatchObject({ resolution: 'raw', points: [{ value: 21.5 }] });
+    expect(query).toHaveBeenLastCalledWith(
+      expect.stringContaining('FROM telemetry_records'),
+      [
+        'organization-1',
+        'device-1',
+        'temperature',
+        expect.any(Date),
+        expect.any(Date),
+      ],
+    );
+  });
+
+  it('uses fixed aggregate routes and keeps relay state as last state', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query
+      .mockResolvedValueOnce({ rows: [device] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await service.telemetry(identity, 'organization-1', 'device-1', {
+      metric: 'relayState',
+      from: new Date('2026-08-01T00:00:00.000Z'),
+      to: new Date('2026-08-06T00:00:00.000Z'),
+      resolution: '5m',
+    });
+
+    const [sql] = query.mock.calls.at(-1) as [string, unknown[]];
+    expect(sql).toContain('FROM telemetry_relay_5m');
+    expect(sql).toContain('last_state');
+    expect(sql).not.toContain('avg(');
+  });
+
+  it('rejects ranges that exceed their requested resolution', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query.mockResolvedValueOnce({ rows: [device] });
+
+    await expect(
+      service.telemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-01T00:00:00.000Z'),
+        to: new Date('2026-08-03T00:00:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires membership and scoped device ownership before exporting telemetry', async () => {
+    requireMembership.mockRejectedValue(new ForbiddenException());
+
+    await expect(
+      service.exportTelemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T00:30:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(query).not.toHaveBeenCalled();
+
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query.mockResolvedValue({ rows: [] });
+    await expect(
+      service.exportTelemetry(identity, 'organization-1', 'foreign-device', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T00:30:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('WHERE organization_id = $1 AND id = $2'),
+      ['organization-1', 'foreign-device'],
+    );
+  });
+
+  it('enforces export ranges and the explicit export row limit', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query.mockResolvedValueOnce({ rows: [device] });
+    await expect(
+      service.exportTelemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T02:00:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    query.mockReset();
+    query.mockResolvedValueOnce({ rows: [device] }).mockResolvedValueOnce({
+      rows: Array.from({ length: 10_001 }, () => ({
+        occurredAt: new Date('2026-08-06T00:00:00.000Z'),
+        value: 1,
+        unit: 'celsius',
+      })),
+    });
+    await expect(
+      service.exportTelemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T00:30:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toThrow('row limit');
+    const [, [sql]] = query.mock.calls as [
+      [string, unknown[]],
+      [string, unknown[]],
+    ];
+    expect(sql).toContain('LIMIT 10001');
+  });
+
+  it('rate limits exports and audits allowed and denied attempts', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    for (let index = 0; index < 10; index += 1) {
+      query
+        .mockResolvedValueOnce({ rows: [device] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] });
+      await service.exportTelemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T00:30:00.000Z'),
+        resolution: 'raw',
+      });
+    }
+    query
+      .mockResolvedValueOnce({ rows: [device] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(
+      service.exportTelemetry(identity, 'organization-1', 'device-1', {
+        metric: 'temperature',
+        from: new Date('2026-08-06T00:00:00.000Z'),
+        to: new Date('2026-08-06T00:30:00.000Z'),
+        resolution: 'raw',
+      }),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_events'),
+      expect.arrayContaining(['device.telemetry.export', 'allowed']),
+    );
+    expect(query).toHaveBeenLastCalledWith(
+      expect.stringContaining('INSERT INTO audit_events'),
+      expect.arrayContaining(['device.telemetry.export', 'denied']),
+    );
   });
 
   it('rejects device creation by non-manager roles', async () => {
