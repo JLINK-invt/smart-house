@@ -10,6 +10,7 @@ const now = new Date('2026-07-30T12:00:01.000Z');
 
 function createCommand(overrides: Record<string, unknown> = {}) {
   return {
+    schemaVersion: '1.0',
     commandId: 'cmd-001',
     nonce: 'nonce-001',
     tenantId: 'demo',

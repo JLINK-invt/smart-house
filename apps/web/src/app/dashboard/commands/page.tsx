@@ -1,5 +1,18 @@
-import { FeaturePage } from "@/components/feature-page";
+import Link from "next/link";
 
 export default function CommandsPage() {
-  return <FeaturePage eyebrow="Control" title="Comandos" description="Envía acciones autorizadas y confirma cada resultado mediante ACK del dispositivo." cards={[{ title: "Pendientes", value: "0", detail: "No hay comandos esperando publicación." }, { title: "Confirmados", value: "0", detail: "Los comandos exitosos requerirán ACK." }, { title: "Expirados", value: "0", detail: "Los comandos sin confirmación no se consideran exitosos." }]} />;
+  return (
+    <section className="feature-page">
+      <header className="feature-hero">
+        <p className="aero-kicker">Control</p>
+        <h1>Comandos</h1>
+        <p>Los comandos se emiten desde el detalle de cada dispositivo para mostrar únicamente las acciones compatibles, solicitar confirmación y seguir su ACK.</p>
+      </header>
+      <article className="feature-card">
+        <h2>Control seguro por dispositivo</h2>
+        <p>Los cambios de estado del relé requieren una confirmación explícita. Tras enviarlo, el botón queda bloqueado y el historial indica si fue enviado, confirmado, rechazado o expiró.</p>
+        <Link className="text-button" href="/dashboard/inventory">Abrir inventario</Link>
+      </article>
+    </section>
+  );
 }

@@ -26,7 +26,7 @@ import {
 } from './devices.service';
 
 type DeviceBody = Partial<DeviceInput>;
-type CommandBody = { type?: string; payload?: unknown };
+type CommandBody = { type?: string; payload?: unknown; confirmed?: unknown };
 type DeviceListQueryParams = Record<string, string | string[] | undefined>;
 
 export function csvCell(value: string | number | null | undefined): string {
@@ -177,13 +177,34 @@ export class DevicesController {
     if (!body.type?.trim()) {
       throw new BadRequestException('Command type is required.');
     }
+    const type = body.type.trim();
+    if (type === 'relay.set') {
+      return this.devices.createCommand(
+        request.identity,
+        organizationId,
+        deviceId,
+        type,
+        body.payload,
+        body.confirmed === true,
+      );
+    }
     return this.devices.createCommand(
       request.identity,
       organizationId,
       deviceId,
-      body.type.trim(),
+      type,
       body.payload,
+      body.confirmed === true,
     );
+  }
+
+  @Get(':deviceId/commands')
+  commands(
+    @Req() request: AuthenticatedRequest,
+    @Param('organizationId') organizationId: string,
+    @Param('deviceId') deviceId: string,
+  ) {
+    return this.devices.commands(request.identity, organizationId, deviceId);
   }
 
   @Post(':deviceId/activation-tokens')

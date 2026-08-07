@@ -180,6 +180,7 @@ export class RelayDevice {
     await this.publishState();
 
     const ack = commandAckSchema.parse({
+      schemaVersion: '1.0',
       messageId: this.ackMessageIds.next(),
       commandId: command.commandId,
       tenantId: this.config.TENANT_ID,
@@ -212,6 +213,7 @@ export class RelayDevice {
     message: string,
   ): CommandAck {
     return commandAckSchema.parse({
+      schemaVersion: '1.0',
       messageId: this.ackMessageIds.next(),
       commandId,
       tenantId: this.config.TENANT_ID,

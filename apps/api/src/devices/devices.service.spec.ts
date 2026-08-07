@@ -8,9 +8,10 @@ import type { OrganizationsService } from '../organizations/organizations.servic
 
 const query = jest.fn();
 const end = jest.fn();
+const connect = jest.fn();
 
 jest.mock('pg', () => ({
-  Pool: jest.fn(() => ({ query, end })),
+  Pool: jest.fn(() => ({ query, end, connect })),
 }));
 
 const identity = { subject: 'user-1', email: 'user@example.com', roles: [] };
@@ -351,7 +352,197 @@ describe('DevicesService', () => {
         {},
       ),
     ).rejects.toThrow('not supported');
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+
+  it('atomically queues a versioned relay command with its actor audit record', async () => {
+    requireMembership.mockResolvedValue({ role: 'admin' });
+    const release = jest.fn();
+    query.mockImplementation((statement: string) => {
+      if (statement.includes('FROM devices WHERE')) return { rows: [device] };
+      if (statement.includes('device_capability_catalog')) {
+        return { rows: [{ commands: ['relay.set'] }] };
+      }
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes('mqtt_tenant_id')) {
+        return { rows: [{ tenantId: 'demo' }] };
+      }
+      if (statement.includes('WITH command AS')) {
+        return {
+          rows: [
+            {
+              id: 'command-1',
+              type: 'relay.set',
+              status: 'pending',
+              expiresAt: '2026-01-01T00:05:00.000Z',
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    connect.mockResolvedValue({ query, release });
+
+    await expect(
+      service.createCommand(
+        identity,
+        'organization-1',
+        'device-1',
+        'relay.set',
+        { state: 'on' },
+        true,
+      ),
+    ).resolves.toEqual({
+      id: 'command-1',
+      type: 'relay.set',
+      status: 'pending',
+      expiresAt: '2026-01-01T00:05:00.000Z',
+    });
+
+    const calls = query.mock.calls as unknown as Array<
+      [string, unknown[] | undefined]
+    >;
+    const commandCall = calls.find(([statement]) =>
+      statement.includes('WITH command AS'),
+    );
+    if (!commandCall?.[1]) throw new Error('Command query was not made.');
+    const [statement, parameters] = commandCall;
+    expect(statement).toContain('requested_by');
+    expect(statement).toContain('INSERT INTO audit_events');
+    expect(statement).toContain("'mqtt.command.publish'");
+    const payload: unknown = JSON.parse(parameters[5] as string);
+    expect(payload).toMatchObject({
+      schemaVersion: '1.0',
+      tenantId: 'demo',
+      deviceId: 'relay-1',
+      commandType: 'relay.set',
+      payload: { state: 'on' },
+    });
+    expect((payload as { commandId: string }).commandId).toBe(parameters[0]);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('permits operators to issue confirmed commands and audits denied attempts', async () => {
+    requireMembership.mockResolvedValue({ role: 'operator' });
+    query
+      .mockResolvedValueOnce({ rows: [device] })
+      .mockResolvedValueOnce({ rows: [{ commands: ['relay.set'] }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(
+      service.createCommand(
+        identity,
+        'organization-1',
+        'device-1',
+        'relay.set',
+        { state: 'on' },
+      ),
+    ).rejects.toThrow('explicit confirmation');
+    expect(query).toHaveBeenLastCalledWith(
+      expect.stringContaining('INSERT INTO audit_events'),
+      expect.arrayContaining([
+        'denied',
+        expect.stringContaining('confirmation_required'),
+      ]),
+    );
+  });
+
+  it('rate limits excessive command attempts and audits the denial', async () => {
+    requireMembership.mockResolvedValue({ role: 'operator' });
+    for (let index = 0; index < 5; index += 1) {
+      const release = jest.fn();
+      query.mockImplementation((statement: string) => {
+        if (statement.includes('FROM devices WHERE')) return { rows: [device] };
+        if (statement.includes('device_capability_catalog'))
+          return { rows: [{ commands: ['relay.set'] }] };
+        if (statement === 'BEGIN' || statement === 'COMMIT')
+          return { rows: [] };
+        if (statement.includes('mqtt_tenant_id'))
+          return { rows: [{ tenantId: 'demo' }] };
+        if (statement.includes('WITH command AS'))
+          return {
+            rows: [
+              {
+                id: `command-${index}`,
+                type: 'relay.set',
+                status: 'pending',
+                expiresAt: '2026-01-01T00:05:00.000Z',
+              },
+            ],
+          };
+        throw new Error(`Unexpected query: ${statement}`);
+      });
+      connect.mockResolvedValue({ query, release });
+      await service.createCommand(
+        identity,
+        'organization-1',
+        'device-1',
+        'relay.set',
+        { state: 'on' },
+        true,
+      );
+    }
+    query.mockReset();
+    query
+      .mockResolvedValueOnce({ rows: [device] })
+      .mockResolvedValueOnce({ rows: [{ commands: ['relay.set'] }] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(
+      service.createCommand(
+        identity,
+        'organization-1',
+        'device-1',
+        'relay.set',
+        { state: 'on' },
+        true,
+      ),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(query).toHaveBeenLastCalledWith(
+      expect.stringContaining('INSERT INTO audit_events'),
+      expect.arrayContaining([
+        'denied',
+        expect.stringContaining('rate_limited'),
+      ]),
+    );
+  });
+
+  it('returns only scoped command status, expiry, and ACK errors to members', async () => {
+    requireMembership.mockResolvedValue({ role: 'viewer' });
+    query
+      .mockResolvedValueOnce({ rows: [device] })
+      .mockResolvedValueOnce({ rows: [{ commands: ['relay.set'] }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'command-1',
+            type: 'relay.set',
+            status: 'failed',
+            expiresAt: '2026-01-01T00:05:00.000Z',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            error: { code: 'RELAY_OFFLINE', message: 'Relay is offline.' },
+          },
+        ],
+      });
+
+    await expect(
+      service.commands(identity, 'organization-1', 'device-1'),
+    ).resolves.toEqual({
+      supportedCommands: ['relay.set'],
+      items: [
+        {
+          id: 'command-1',
+          type: 'relay.set',
+          status: 'failed',
+          expiresAt: '2026-01-01T00:05:00.000Z',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          error: { code: 'RELAY_OFFLINE', message: 'Relay is offline.' },
+        },
+      ],
+    });
+    expect(query).toHaveBeenLastCalledWith(
+      expect.stringContaining('WHERE organization_id = $1 AND device_id = $2'),
+      ['organization-1', 'device-1'],
+    );
   });
 
   it('exchanges a valid activation token once and returns only non-secret references', async () => {

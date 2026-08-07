@@ -121,4 +121,37 @@ describe('SpikeGateway', () => {
     ]);
     expect(emit).toHaveBeenCalledWith('telemetry.persisted', event);
   });
+
+  it('validates and emits command status events to authorized rooms', () => {
+    const instance = gateway();
+    const emit = jest.fn();
+    const to = jest.fn(() => ({ emit }));
+    instance.server = { to } as never;
+    const event = {
+      eventId: '11111111-1111-4111-8111-111111111111',
+      correlationId: '22222222-2222-4222-8222-222222222222',
+      organizationId: '33333333-3333-4333-8333-333333333333',
+      deviceId: '44444444-4444-4444-8444-444444444444',
+      command: {
+        id: '22222222-2222-4222-8222-222222222222',
+        type: 'relay.set',
+        status: 'acknowledged',
+        expiresAt: '2026-01-01T00:05:00.000Z',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        error: null,
+      },
+    };
+
+    (
+      instance as never as {
+        handleCommandStatusMessage: (payload: string) => void;
+      }
+    ).handleCommandStatusMessage(JSON.stringify(event));
+
+    expect(to).toHaveBeenCalledWith([
+      'organization:33333333-3333-4333-8333-333333333333',
+      'organization:33333333-3333-4333-8333-333333333333:device:44444444-4444-4444-8444-444444444444',
+    ]);
+    expect(emit).toHaveBeenCalledWith('command.status', event);
+  });
 });

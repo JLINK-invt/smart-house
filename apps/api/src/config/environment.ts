@@ -22,6 +22,8 @@ const environmentSchema = z.object({
     .int()
     .min(1_000)
     .default(60_000),
+  COMMAND_RATE_LIMIT: z.coerce.number().int().min(1).default(5),
+  COMMAND_RATE_WINDOW_MS: z.coerce.number().int().min(1_000).default(60_000),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

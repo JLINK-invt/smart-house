@@ -7,6 +7,7 @@ import {
 import Redis from 'ioredis';
 import type { Server, Socket } from 'socket.io';
 import { z } from 'zod';
+import { commandStatusEventSchema } from '@smart-house/contracts';
 import { readEnvironment } from '../config/environment';
 import { IdentityService } from '../identity/identity.service';
 import { OrganizationsService } from '../organizations/organizations.service';
@@ -18,6 +19,7 @@ const persistedTelemetryEventSchema = z.object({
   organizationId: z.string().min(1),
   telemetry: z.object({ deviceId: z.string().min(1).max(128) }).passthrough(),
 });
+const commandStatusTopic = 'command.status';
 
 const deviceSubscriptionSchema = z.object({
   organizationId: z.string().min(1),
@@ -53,10 +55,11 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.redis.subscribe('telemetry.persisted');
+    await this.redis.subscribe('telemetry.persisted', commandStatusTopic);
     this.redis.on('message', (channel, payload) => {
-      if (channel !== 'telemetry.persisted') return;
-      this.handleRedisMessage(payload);
+      if (channel === 'telemetry.persisted') this.handleRedisMessage(payload);
+      if (channel === commandStatusTopic)
+        this.handleCommandStatusMessage(payload);
     });
   }
 
@@ -131,5 +134,26 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
         deviceRoom(event.data.organizationId, event.data.telemetry.deviceId),
       ])
       .emit('telemetry.persisted', event.data);
+  }
+
+  private handleCommandStatusMessage(payload: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      this.logger.warn('Ignored invalid Redis command status event.');
+      return;
+    }
+    const event = commandStatusEventSchema.safeParse(parsed);
+    if (!event.success) {
+      this.logger.warn('Ignored invalid Redis command status event.');
+      return;
+    }
+    this.server
+      .to([
+        organizationRoom(event.data.organizationId),
+        deviceRoom(event.data.organizationId, event.data.deviceId),
+      ])
+      .emit(commandStatusTopic, event.data);
   }
 }

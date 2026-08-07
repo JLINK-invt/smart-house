@@ -150,6 +150,7 @@ describeWithBroker('MQTT simulator integration', () => {
         observer,
         config.relayCommandsTopic,
         JSON.stringify({
+          schemaVersion: '1.0',
           commandId: `cmd-${suffix}`,
           nonce: `nonce-${suffix}`,
           tenantId: 'demo',
@@ -221,6 +222,7 @@ describeWithBroker('MQTT simulator integration', () => {
         platform,
         config.relayCommandsTopic,
         JSON.stringify({
+          schemaVersion: '1.0',
           commandId,
           nonce: `nonce-${suffix}`,
           tenantId: 'demo',

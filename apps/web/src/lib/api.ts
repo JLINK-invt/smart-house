@@ -92,6 +92,18 @@ export type CredentialMetadata = {
 export type CredentialRotation = ActivationToken & {
   revokedCredentialReferences: string[];
 };
+export type DeviceCommand = {
+  id: string;
+  type: string;
+  status: "pending" | "sent" | "acknowledged" | "failed" | "expired";
+  expiresAt: string;
+  createdAt: string;
+  error: { code: string; message: string } | null;
+};
+export type DeviceCommands = {
+  supportedCommands: string[];
+  items: DeviceCommand[];
+};
 
 export class UnauthorizedApiError extends Error {
   constructor() {
@@ -229,6 +241,24 @@ export async function getDeviceCredentials(
   return response.ok ? ((await response.json()) as CredentialMetadata[]) : [];
 }
 
+export async function getDeviceCommands(
+  accessToken: string,
+  organizationId: string,
+  deviceId: string,
+): Promise<DeviceCommands> {
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/devices/${deviceId}/commands`,
+    accessToken,
+  );
+  throwIfUnauthorized(response);
+  if (!response.ok) {
+    throw new Error(
+      `Device commands request failed (${response.status}): ${(await response.text()) || response.statusText}`,
+    );
+  }
+  return (await response.json()) as DeviceCommands;
+}
+
 async function mutateDevice(
   accessToken: string,
   path: string,
@@ -351,6 +381,33 @@ export function revokeDeviceCredential(
     `/api/organizations/${organizationId}/devices/${deviceId}/credentials/${credentialReference}/revoke`,
     "POST",
   );
+}
+
+export async function createDeviceCommand(
+  accessToken: string,
+  organizationId: string,
+  deviceId: string,
+  input: { type: string; payload: unknown; confirmed: boolean },
+): Promise<Pick<DeviceCommand, "id" | "type" | "status" | "expiresAt">> {
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/devices/${deviceId}/commands`,
+    accessToken,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  throwIfUnauthorized(response);
+  if (!response.ok) {
+    throw new Error(
+      `Command request failed (${response.status}): ${(await response.text()) || response.statusText}`,
+    );
+  }
+  return (await response.json()) as Pick<
+    DeviceCommand,
+    "id" | "type" | "status" | "expiresAt"
+  >;
 }
 
 export async function getLatestTelemetry(

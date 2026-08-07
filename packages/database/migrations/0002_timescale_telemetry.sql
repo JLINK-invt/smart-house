@@ -2,15 +2,35 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
-ALTER TABLE telemetry_records DROP CONSTRAINT IF EXISTS telemetry_records_pkey;
-ALTER TABLE telemetry_records
-  ADD PRIMARY KEY (id, occurred_at);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'telemetry_records'::regclass
+      AND conname = 'telemetry_records_pkey'
+  ) THEN
+    ALTER TABLE telemetry_records ADD PRIMARY KEY (id, occurred_at);
+  END IF;
 
-ALTER TABLE telemetry_records
-  DROP CONSTRAINT IF EXISTS telemetry_records_organization_id_device_id_message_id_metr_key;
-ALTER TABLE telemetry_records
-  ADD CONSTRAINT telemetry_records_message_idempotency_key
-  UNIQUE (organization_id, device_id, message_id, metric, occurred_at);
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'telemetry_records'::regclass
+      AND conname = 'telemetry_records_organization_id_device_id_message_id_metr_key'
+  ) THEN
+    ALTER TABLE telemetry_records
+      DROP CONSTRAINT telemetry_records_organization_id_device_id_message_id_metr_key;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'telemetry_records'::regclass
+      AND conname = 'telemetry_records_message_idempotency_key'
+  ) THEN
+    ALTER TABLE telemetry_records
+      ADD CONSTRAINT telemetry_records_message_idempotency_key
+      UNIQUE (organization_id, device_id, message_id, metric, occurred_at);
+  END IF;
+END $$;
 
 SELECT create_hypertable('telemetry_records', 'occurred_at', if_not_exists => TRUE, migrate_data => TRUE);
 

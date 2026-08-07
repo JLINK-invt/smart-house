@@ -1,14 +1,17 @@
 import { cookies } from "next/headers";
 import Link from "next/link";
 import { DeviceTelemetryChart } from "@/components/device-telemetry-chart";
+import { CommandControl } from "./command-control";
 import { accessTokenCookie } from "@/lib/auth";
 import {
   getCapabilityCatalog,
   getDevice,
   getDeviceTelemetry,
+  getDeviceCommands,
   type CapabilityCatalog,
   type Device,
   type DeviceTelemetry,
+  type DeviceCommands,
 } from "@/lib/api";
 import { getApiUrl } from "@/lib/config";
 import { redirectExpiredSession } from "@/lib/session";
@@ -23,10 +26,12 @@ export default async function DeviceDetailPage({
   let device: Device;
   let catalog: CapabilityCatalog[];
   let recentTelemetry: DeviceTelemetry[];
+  let commands: DeviceCommands;
   try {
-    [device, catalog] = await Promise.all([
+    [device, catalog, commands] = await Promise.all([
       getDevice(accessToken, organizationId, deviceId),
       getCapabilityCatalog(accessToken, organizationId),
+      getDeviceCommands(accessToken, organizationId, deviceId),
     ]);
     const capability = catalog.find(
       (profile) => profile.type === device.type && profile.version === device.capabilityVersion,
@@ -107,6 +112,13 @@ export default async function DeviceDetailPage({
           initialResolution={initialTelemetry.resolution}
         />
       ) : <p className="organization-note">Este tipo de dispositivo no declara métricas disponibles.</p>}
+      <CommandControl
+        apiOrigin={getApiUrl()}
+        accessToken={accessToken}
+        organizationId={organizationId}
+        deviceId={deviceId}
+        commands={commands}
+      />
     </section>
   );
 }

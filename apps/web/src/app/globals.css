@@ -8,6 +8,25 @@
   --background: #dff5ff;
 }
 
+.command-control {
+  margin-top: 28px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+.command-control h2, .command-control h3 { margin: 4px 0 10px; }
+.command-control form { display: grid; gap: 12px; max-width: 420px; }
+.command-control label { display: grid; gap: 6px; color: var(--muted); font-weight: 700; }
+.command-control select, .command-control button { min-height: 42px; border-radius: 10px; font: inherit; }
+.command-control select { border: 1px solid var(--line); padding: 8px; color: var(--ink); }
+.command-control button { border: 0; padding: 0 14px; background: var(--accent); color: white; font-weight: 800; }
+.command-control button:disabled { cursor: not-allowed; opacity: 0.6; }
+.command-confirmation { grid-template-columns: auto 1fr; align-items: center; }
+.command-history { margin-top: 24px; border-top: 1px solid var(--line); }
+.command-history ul { padding-left: 18px; color: var(--muted); }
+.command-history li { margin: 8px 0; }
+
 /* Bright aqua glass replaces the neutral surfaces in the application shell. */
 .dashboard-sidebar {
   background: linear-gradient(
