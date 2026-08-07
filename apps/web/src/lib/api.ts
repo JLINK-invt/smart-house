@@ -4,7 +4,7 @@ import {
   type components,
   type HealthResponse,
 } from "@smart-house/contracts";
-import { getApiUrl } from "./config";
+import { getApiUrl } from "./config.ts";
 
 type ApiStatus =
   { state: "online"; data: HealthResponse } | { state: "offline"; data: null };
@@ -53,6 +53,24 @@ export type DeviceInput = Pick<
   Device,
   "externalId" | "name" | "type" | "capabilityVersion"
 >;
+export type DeviceListQuery = {
+  q?: string;
+  status?: string;
+  type?: string;
+  limit?: number;
+  cursor?: string;
+};
+export type DeviceList = { items: Device[]; nextCursor: string | null };
+export type TelemetryPoint = {
+  occurredAt: string;
+  value: number;
+  unit: string;
+};
+export type DeviceTelemetry = {
+  metric: string;
+  resolution: "raw" | "5m" | "1h";
+  points: TelemetryPoint[];
+};
 export type CapabilityCatalog = {
   type: string;
   version: string;
@@ -75,6 +93,17 @@ export type CredentialRotation = ActivationToken & {
   revokedCredentialReferences: string[];
 };
 
+export class UnauthorizedApiError extends Error {
+  constructor() {
+    super("The API session has expired.");
+    this.name = "UnauthorizedApiError";
+  }
+}
+
+function throwIfUnauthorized(response: Response): void {
+  if (response.status === 401) throw new UnauthorizedApiError();
+}
+
 async function authorizedFetch(
   path: string,
   accessToken: string,
@@ -91,6 +120,7 @@ export async function getOrganizations(
   accessToken: string,
 ): Promise<Organization[]> {
   const response = await authorizedFetch("/api/organizations", accessToken);
+  throwIfUnauthorized(response);
   return response.ok ? ((await response.json()) as Organization[]) : [];
 }
 
@@ -102,18 +132,76 @@ export async function getOrganizationMembers(
     `/api/organizations/${organizationId}/members`,
     accessToken,
   );
+  throwIfUnauthorized(response);
   return response.ok ? ((await response.json()) as OrganizationMember[]) : [];
 }
 
 export async function getDevices(
   accessToken: string,
   organizationId: string,
-): Promise<Device[]> {
+  query: DeviceListQuery = {},
+): Promise<DeviceList> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
   const response = await authorizedFetch(
-    `/api/organizations/${organizationId}/devices`,
+    `/api/organizations/${organizationId}/devices${params.size ? `?${params}` : ""}`,
     accessToken,
   );
-  return response.ok ? ((await response.json()) as Device[]) : [];
+  throwIfUnauthorized(response);
+  if (!response.ok) {
+    throw new Error(
+      `Device inventory request failed (${response.status}): ${(await response.text()) || response.statusText}`,
+    );
+  }
+  return (await response.json()) as DeviceList;
+}
+
+export async function getDevice(
+  accessToken: string,
+  organizationId: string,
+  deviceId: string,
+): Promise<Device> {
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/devices/${deviceId}`,
+    accessToken,
+  );
+  throwIfUnauthorized(response);
+  if (!response.ok) {
+    throw new Error(
+      `Device detail request failed (${response.status}): ${(await response.text()) || response.statusText}`,
+    );
+  }
+  return (await response.json()) as Device;
+}
+
+export async function getDeviceTelemetry(
+  accessToken: string,
+  organizationId: string,
+  deviceId: string,
+  query: {
+    metric: string;
+    from: string;
+    to: string;
+    resolution?: "auto" | "raw" | "5m" | "1h";
+  },
+): Promise<DeviceTelemetry> {
+  const params = new URLSearchParams({
+    ...query,
+    resolution: query.resolution ?? "auto",
+  });
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/devices/${deviceId}/telemetry?${params}`,
+    accessToken,
+  );
+  throwIfUnauthorized(response);
+  if (!response.ok) {
+    throw new Error(
+      `Device telemetry request failed (${response.status}): ${(await response.text()) || response.statusText}`,
+    );
+  }
+  return (await response.json()) as DeviceTelemetry;
 }
 
 export async function getCapabilityCatalog(
@@ -124,6 +212,7 @@ export async function getCapabilityCatalog(
     `/api/organizations/${organizationId}/devices/capability-catalog`,
     accessToken,
   );
+  throwIfUnauthorized(response);
   return response.ok ? ((await response.json()) as CapabilityCatalog[]) : [];
 }
 
@@ -136,6 +225,7 @@ export async function getDeviceCredentials(
     `/api/organizations/${organizationId}/devices/${deviceId}/credentials`,
     accessToken,
   );
+  throwIfUnauthorized(response);
   return response.ok ? ((await response.json()) as CredentialMetadata[]) : [];
 }
 
@@ -151,6 +241,7 @@ async function mutateDevice(
       body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  throwIfUnauthorized(response);
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(
@@ -165,6 +256,7 @@ async function deviceRequest<T>(
   method: "POST",
 ): Promise<T> {
   const response = await authorizedFetch(path, accessToken, { method });
+  throwIfUnauthorized(response);
   if (!response.ok) {
     throw new Error(
       `Device API request failed (${response.status}): ${(await response.text()) || response.statusText}`,
@@ -264,17 +356,19 @@ export function revokeDeviceCredential(
 export async function getLatestTelemetry(
   accessToken: string,
 ): Promise<LatestTelemetryResponse> {
+  let response: Response;
   try {
-    const response = await fetch(`${getApiUrl()}/api/spike/telemetry/latest`, {
+    response = await fetch(`${getApiUrl()}/api/spike/telemetry/latest`, {
       cache: "no-store",
       signal: AbortSignal.timeout(2_000),
       headers: { authorization: `Bearer ${accessToken}` },
     });
-    if (!response.ok) return [];
-
-    const result = latestTelemetrySchema.safeParse(await response.json());
-    return result.success ? result.data : [];
   } catch {
     return [];
   }
+  throwIfUnauthorized(response);
+  if (!response.ok) return [];
+
+  const result = latestTelemetrySchema.safeParse(await response.json());
+  return result.success ? result.data : [];
 }

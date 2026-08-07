@@ -1,23 +1,43 @@
 import { Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
-import type { Telemetry } from '@smart-house/contracts';
+import {
+  SubscribeMessage,
+  WebSocketGateway,
+  WebSocketServer,
+} from '@nestjs/websockets';
 import Redis from 'ioredis';
-import type { Server } from 'socket.io';
+import type { Server, Socket } from 'socket.io';
+import { z } from 'zod';
 import { readEnvironment } from '../config/environment';
 import { IdentityService } from '../identity/identity.service';
 import { OrganizationsService } from '../organizations/organizations.service';
 
-type PersistedTelemetryEvent = {
-  eventId: string;
-  correlationId: string;
-  metric: string;
-  organizationId: string;
-  telemetry: Telemetry;
+const persistedTelemetryEventSchema = z.object({
+  eventId: z.string().min(1),
+  correlationId: z.string().min(1),
+  metric: z.string().min(1),
+  organizationId: z.string().min(1),
+  telemetry: z.object({ deviceId: z.string().min(1).max(128) }).passthrough(),
+});
+
+const deviceSubscriptionSchema = z.object({
+  organizationId: z.string().min(1),
+  deviceId: z.string().min(1).max(128),
+});
+
+type GatewayClient = Pick<Socket, 'id' | 'join' | 'disconnect'> & {
+  handshake: { auth: { accessToken?: unknown } };
 };
+
+const organizationRoom = (organizationId: string) =>
+  `organization:${organizationId}`;
+const deviceRoom = (organizationId: string, deviceId: string) =>
+  `${organizationRoom(organizationId)}:device:${deviceId}`;
 
 @WebSocketGateway({
   namespace: '/spike',
   cors: { origin: true },
+  pingInterval: 25_000,
+  pingTimeout: 20_000,
 })
 export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
   @WebSocketServer()
@@ -36,42 +56,48 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
     await this.redis.subscribe('telemetry.persisted');
     this.redis.on('message', (channel, payload) => {
       if (channel !== 'telemetry.persisted') return;
-      try {
-        const event = JSON.parse(payload) as PersistedTelemetryEvent;
-        for (const socket of this.server.sockets.sockets.values()) {
-          if (
-            this.socketOrganizations.get(socket.id)?.has(event.organizationId)
-          ) {
-            socket.emit('telemetry.persisted', event);
-          }
-        }
-      } catch {
-        this.logger.warn('Ignored invalid Redis telemetry event.');
-      }
+      this.handleRedisMessage(payload);
     });
   }
 
-  async handleConnection(client: {
-    id: string;
-    handshake: { auth: { accessToken?: unknown } };
-    disconnect: () => void;
-  }): Promise<void> {
+  async handleConnection(client: GatewayClient): Promise<void> {
     const accessToken = client.handshake.auth.accessToken;
     if (typeof accessToken !== 'string') {
       client.disconnect();
       return;
     }
     try {
-      const identity = await this.identityService.verify(accessToken);
-      this.socketOrganizations.set(
-        client.id,
-        new Set(
-          await this.organizationsService.activeOrganizationIds(identity),
+      const organizations = new Set(
+        await this.organizationsService.activeOrganizationIds(
+          await this.identityService.verify(accessToken),
         ),
       );
+      this.socketOrganizations.set(client.id, organizations);
+      for (const organizationId of organizations)
+        void client.join(organizationRoom(organizationId));
     } catch {
       client.disconnect();
     }
+  }
+
+  @SubscribeMessage('telemetry.subscribe')
+  async handleSubscription(
+    client: Pick<Socket, 'id' | 'join'>,
+    payload: unknown,
+  ): Promise<{ ok: boolean }> {
+    const subscription = deviceSubscriptionSchema.safeParse(payload);
+    if (
+      !subscription.success ||
+      !this.socketOrganizations
+        .get(client.id)
+        ?.has(subscription.data.organizationId)
+    ) {
+      return { ok: false };
+    }
+    await client.join(
+      deviceRoom(subscription.data.organizationId, subscription.data.deviceId),
+    );
+    return { ok: true };
   }
 
   handleDisconnect(client: { id: string }): void {
@@ -80,5 +106,30 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     await this.redis.quit();
+  }
+
+  private handleRedisMessage(payload: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      this.logger.warn('Ignored invalid Redis telemetry event.');
+      return;
+    }
+    const event = persistedTelemetryEventSchema.safeParse(parsed);
+    if (!event.success) {
+      this.logger.warn('Ignored invalid Redis telemetry event.');
+      return;
+    }
+
+    // Each API replica subscribes to Redis and emits only to its local members.
+    // A Socket.IO Redis adapter is unnecessary because worker PubSub already fans
+    // every persisted event out to every replica.
+    this.server
+      .to([
+        organizationRoom(event.data.organizationId),
+        deviceRoom(event.data.organizationId, event.data.telemetry.deviceId),
+      ])
+      .emit('telemetry.persisted', event.data);
   }
 }

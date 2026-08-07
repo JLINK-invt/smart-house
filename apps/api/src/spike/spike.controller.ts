@@ -15,6 +15,6 @@ export class SpikeController {
   getLatestTelemetry(
     @Req() request: AuthenticatedRequest,
   ): Promise<LatestTelemetry> {
-    return this.spikeService.getLatestTelemetry(request.identity.subject);
+    return this.spikeService.getLatestTelemetry(request.identity);
   }
 }

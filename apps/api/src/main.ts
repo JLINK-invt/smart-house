@@ -14,6 +14,12 @@ async function bootstrap() {
     AppModule,
     new FastifyAdapter(),
   );
+  app.enableCors({
+    origin: environment.WEB_ORIGIN,
+    methods: ['GET', 'HEAD', 'POST', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Correlation-Id'],
+    exposedHeaders: ['X-Correlation-Id'],
+  });
   configureApi(app);
   app.enableShutdownHooks();
   app

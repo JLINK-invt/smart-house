@@ -20,7 +20,7 @@ export class OrganizationsService implements OnModuleDestroy {
   }
 
   async list(identity: Identity) {
-    const userId = await this.upsertUser(identity);
+    const userId = await this.ensureDefaultMembership(identity);
     const result = await this.database.query<{
       id: string;
       name: string;
@@ -105,6 +105,46 @@ export class OrganizationsService implements OnModuleDestroy {
       [identity.subject, identity.email],
     );
     return result.rows[0].id;
+  }
+
+  private async ensureDefaultMembership(identity: Identity): Promise<string> {
+    const client = await this.database.connect();
+    try {
+      await client.query('BEGIN');
+      // Serialize first-login initialization per Keycloak subject.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        identity.subject,
+      ]);
+      const user = await client.query<{ id: string }>(
+        `INSERT INTO users (subject, email) VALUES ($1, $2)
+         ON CONFLICT (subject) DO UPDATE SET email = EXCLUDED.email RETURNING id`,
+        [identity.subject, identity.email],
+      );
+      const userId = user.rows[0].id;
+      const membership = await client.query<{ exists: boolean }>(
+        'SELECT EXISTS(SELECT 1 FROM memberships WHERE user_id = $1) AS "exists"',
+        [userId],
+      );
+
+      if (!membership.rows[0].exists) {
+        const organization = await client.query<{ id: string }>(
+          'INSERT INTO organizations (name) VALUES ($1) RETURNING id',
+          ['Personal organization'],
+        );
+        await client.query(
+          "INSERT INTO memberships (organization_id, user_id, role, status) VALUES ($1, $2, 'owner', 'active')",
+          [organization.rows[0].id, userId],
+        );
+      }
+
+      await client.query('COMMIT');
+      return userId;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async requireMembership(

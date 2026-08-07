@@ -85,6 +85,32 @@ describe('RelayDevice', () => {
     expect(ackMessages[1]?.payload).toBe(ackMessages[0]?.payload);
   });
 
+  it('coalesces concurrent QoS 1 redeliveries before the command ACK', async () => {
+    const mqtt = new FakePublisher();
+    const config = createTestConfig();
+    const relay = new RelayDevice(
+      config,
+      mqtt,
+      undefined,
+      undefined,
+      () => now,
+      new ProfileEngine(true, 'relay-failures', 'seed', () => 1),
+    );
+    const payload = Buffer.from(JSON.stringify(createCommand()));
+
+    await Promise.all([
+      relay.handleCommand(config.relayCommandsTopic, payload),
+      relay.handleCommand(config.relayCommandsTopic, payload),
+    ]);
+
+    expect(
+      mqtt.messages.filter(({ topic }) => topic === config.relayTelemetryTopic),
+    ).toHaveLength(1);
+    expect(
+      mqtt.messages.filter(({ topic }) => topic === config.relayAcksTopic),
+    ).toHaveLength(1);
+  });
+
   it.each([
     ['tenant_mismatch', { tenantId: 'other' }],
     ['device_mismatch', { deviceId: 'relay-999' }],
