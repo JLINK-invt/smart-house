@@ -9,6 +9,12 @@ import {
 } from '@nestjs/common';
 import { Pool } from 'pg';
 import { createHash, randomBytes } from 'node:crypto';
+import {
+  commandSchemaVersion,
+  relayCommandSchema,
+  relaySetPayloadSchema,
+  type RelayCommand,
+} from '@smart-house/contracts';
 import { readEnvironment } from '../config/environment';
 import type { Identity } from '../identity/identity.service';
 import { OrganizationsService } from '../organizations/organizations.service';
@@ -99,9 +105,24 @@ export type CredentialMetadata = {
   status: 'active' | 'revoked' | 'expired';
 };
 
+export type DeviceCommand = {
+  id: string;
+  type: string;
+  status: 'pending' | 'sent' | 'acknowledged' | 'failed' | 'expired';
+  expiresAt: string;
+  createdAt: string;
+  error: { code: string; message: string } | null;
+};
+
+export type DeviceCommands = {
+  supportedCommands: string[];
+  items: DeviceCommand[];
+};
+
 @Injectable()
 export class DevicesService implements OnModuleDestroy {
   private readonly exportAttempts = new Map<string, number[]>();
+  private readonly commandAttempts = new Map<string, number[]>();
   private readonly database = new Pool({
     connectionString: readEnvironment(process.env).DATABASE_URL,
   });
@@ -400,31 +421,201 @@ export class DevicesService implements OnModuleDestroy {
     deviceId: string,
     commandType: string,
     payload: unknown,
-  ) {
-    await this.requireManager(identity, organizationId);
+    confirmed = false,
+  ): Promise<{ id: string; type: string; status: string; expiresAt: string }> {
+    const membership = await this.organizations.requireMembership(
+      identity,
+      organizationId,
+    );
+    if (!['owner', 'admin', 'operator'].includes(membership.role)) {
+      await this.writeAudit(
+        organizationId,
+        identity.subject,
+        'device.command.request',
+        'device',
+        deviceId,
+        'denied',
+        {
+          reason: 'role_not_authorized',
+          role: membership.role,
+          type: commandType,
+        },
+      );
+      throw new ForbiddenException(
+        'Only owners, admins, and operators can issue commands.',
+      );
+    }
     const device = await this.find(organizationId, deviceId);
     const catalog = await this.requireCatalog(
       device.type,
       device.capabilityVersion,
     );
     if (!catalog.commands.includes(commandType)) {
+      await this.writeAudit(
+        organizationId,
+        identity.subject,
+        'device.command.request',
+        'device',
+        deviceId,
+        'denied',
+        { reason: 'unsupported_command', type: commandType },
+      );
       throw new BadRequestException(
         `Command ${commandType} is not supported by this device.`,
       );
     }
-    const result = await this.database.query<{ id: string; type: string }>(
-      `INSERT INTO commands (organization_id, device_id, type, payload, nonce, expires_at)
-       VALUES ($1, $2, $3, $4::jsonb, $5, now() + interval '5 minutes')
-       RETURNING id, type`,
-      [
+    if (commandType !== 'relay.set') {
+      await this.writeAudit(
         organizationId,
+        identity.subject,
+        'device.command.request',
+        'device',
         deviceId,
+        'denied',
+        { reason: 'unsupported_contract', type: commandType },
+      );
+      throw new BadRequestException(
+        'Only relay.set commands have an MQTT contract.',
+      );
+    }
+    if (!confirmed) {
+      await this.writeAudit(
+        organizationId,
+        identity.subject,
+        'device.command.request',
+        'device',
+        deviceId,
+        'denied',
+        { reason: 'confirmation_required', type: commandType },
+      );
+      throw new BadRequestException(
+        'relay.set commands require explicit confirmation.',
+      );
+    }
+    const relayPayload = relaySetPayloadSchema.safeParse(payload);
+    if (!relayPayload.success) {
+      await this.writeAudit(
+        organizationId,
+        identity.subject,
+        'device.command.request',
+        'device',
+        deviceId,
+        'denied',
+        { reason: 'invalid_payload', type: commandType },
+      );
+      throw new BadRequestException(
+        'relay.set payload must contain state on or off.',
+      );
+    }
+    if (!this.allowCommand(`${organizationId}:${identity.subject}`)) {
+      await this.writeAudit(
+        organizationId,
+        identity.subject,
+        'device.command.request',
+        'device',
+        deviceId,
+        'denied',
+        { reason: 'rate_limited', type: commandType },
+      );
+      throw new HttpException(
+        'Command rate limit exceeded.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const client = await this.database.connect();
+    try {
+      await client.query('BEGIN');
+      const tenant = await client.query<{ tenantId: string | null }>(
+        `SELECT mqtt_tenant_id AS "tenantId" FROM organizations
+         WHERE id = $1 FOR SHARE`,
+        [organizationId],
+      );
+      const tenantId = tenant.rows[0]?.tenantId;
+      if (!tenantId) {
+        throw new BadRequestException(
+          'Organization has no MQTT tenant mapping.',
+        );
+      }
+
+      const issuedAt = new Date();
+      const command = relayCommandSchema.parse({
+        schemaVersion: commandSchemaVersion,
+        commandId: crypto.randomUUID(),
+        nonce: crypto.randomUUID(),
+        tenantId,
+        deviceId: device.externalId,
         commandType,
-        JSON.stringify(payload ?? {}),
-        crypto.randomUUID(),
-      ],
+        issuedAt: issuedAt.toISOString(),
+        expiresAt: new Date(issuedAt.getTime() + 5 * 60_000).toISOString(),
+        payload: relayPayload.data,
+      });
+      const result = await client.query<{
+        id: string;
+        type: string;
+        status: DeviceCommand['status'];
+        expiresAt: string;
+      }>(
+        `WITH command AS (
+           INSERT INTO commands
+             (id, organization_id, device_id, requested_by, type, payload, nonce, schema_version, expires_at)
+           VALUES ($1, $2, $3, (SELECT id FROM users WHERE subject = $4), $5, $6::jsonb, $7, $8, $9)
+           RETURNING id, type, status, expires_at AS "expiresAt"
+         ), audited AS (
+           INSERT INTO audit_events
+             (organization_id, actor_id, action, resource_type, resource_id, result, correlation_id, metadata)
+           SELECT $2, (SELECT id FROM users WHERE subject = $4), 'device.command.request',
+                  'command', id::text, 'allowed', id,
+                  jsonb_build_object('deviceId', $3, 'type', $5, 'schemaVersion', $8)
+           FROM command
+         ), queued AS (
+           INSERT INTO outbox_events (id, organization_id, topic, payload)
+           SELECT id, $2, 'mqtt.command.publish', $6::jsonb FROM command
+         )
+          SELECT id, type, status, "expiresAt" FROM command`,
+        [
+          command.commandId,
+          organizationId,
+          deviceId,
+          identity.subject,
+          command.commandType,
+          JSON.stringify(command satisfies RelayCommand),
+          command.nonce,
+          command.schemaVersion,
+          command.expiresAt,
+        ],
+      );
+      await client.query('COMMIT');
+      return result.rows[0];
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async commands(
+    identity: Identity,
+    organizationId: string,
+    deviceId: string,
+  ): Promise<DeviceCommands> {
+    await this.organizations.requireMembership(identity, organizationId);
+    const device = await this.find(organizationId, deviceId);
+    const catalog = await this.requireCatalog(
+      device.type,
+      device.capabilityVersion,
     );
-    return result.rows[0];
+    const result = await this.database.query<DeviceCommand>(
+      `SELECT id, type, status, expires_at AS "expiresAt", created_at AS "createdAt",
+              error
+       FROM commands
+       WHERE organization_id = $1 AND device_id = $2
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [organizationId, deviceId],
+    );
+    return { supportedCommands: catalog.commands, items: result.rows };
   }
 
   async issueActivationToken(
@@ -782,6 +973,22 @@ export class DevicesService implements OnModuleDestroy {
     }
     attempts.push(now);
     this.exportAttempts.set(subject, attempts);
+    return true;
+  }
+
+  private allowCommand(subject: string): boolean {
+    const environment = readEnvironment(process.env);
+    const now = Date.now();
+    const windowStart = now - environment.COMMAND_RATE_WINDOW_MS;
+    const attempts = (this.commandAttempts.get(subject) ?? []).filter(
+      (attempt) => attempt > windowStart,
+    );
+    if (attempts.length >= environment.COMMAND_RATE_LIMIT) {
+      this.commandAttempts.set(subject, attempts);
+      return false;
+    }
+    attempts.push(now);
+    this.commandAttempts.set(subject, attempts);
     return true;
   }
 

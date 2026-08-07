@@ -15,6 +15,17 @@ const telemetryPayload = {
   metrics: { temperature: { value: 68, unit: 'fahrenheit' as const } },
 };
 
+const commandAckPayload = {
+  schemaVersion: '1.0' as const,
+  messageId: 'ack-1',
+  commandId: 'command-1',
+  tenantId: 'demo',
+  deviceId: 'relay-1',
+  status: 'acknowledged' as const,
+  occurredAt: '2026-01-01T00:01:00.000Z',
+  result: { state: 'on' as const },
+};
+
 const normalize = (): NormalizedTelemetry =>
   normalizeTelemetry(temperatureTelemetrySchema.parse(telemetryPayload), {
     receivedAt: new Date('2026-01-01T00:01:00.000Z'),
@@ -260,6 +271,259 @@ describe('WorkerService', () => {
     );
   });
 
+  it('records a matching command acknowledgement from pending or sent idempotently', async () => {
+    const release = jest.fn();
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes('FROM commands c')) {
+        return {
+          rows: [
+            {
+              organizationId: 'organization-1',
+              deviceId: 'device-1',
+              externalId: 'relay-1',
+              tenantId: 'demo',
+              status: 'sent',
+            },
+          ],
+        };
+      }
+      if (statement.includes('SET status = $2'))
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              id: 'command-1',
+              organizationId: 'organization-1',
+              deviceId: 'device-1',
+              type: 'relay.set',
+              status: 'acknowledged',
+              expiresAt: '2026-01-01T00:05:00.000Z',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              error: null,
+            },
+          ],
+        };
+      if (statement.includes('INSERT INTO outbox_events'))
+        return { rowCount: 1, rows: [] };
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release }),
+    };
+
+    await (
+      service as unknown as {
+        consume: (topic: string, payload: Buffer) => Promise<void>;
+      }
+    ).consume(
+      'tenants/demo/devices/relay-1/command-acks',
+      Buffer.from(JSON.stringify(commandAckPayload)),
+    );
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("status IN ('pending', 'sent')"),
+      ['command-1', 'acknowledged', null],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO outbox_events'),
+      [
+        expect.any(String),
+        'organization-1',
+        'command.status',
+        expect.objectContaining({
+          organizationId: 'organization-1',
+          deviceId: 'device-1',
+          // Jest matchers intentionally return unknown-shaped values.
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          command: expect.objectContaining({
+            id: 'command-1',
+            status: 'acknowledged',
+          }),
+        }),
+      ],
+    );
+    expect(query).toHaveBeenCalledWith('COMMIT');
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists a device failure detail with a failed acknowledgement', async () => {
+    const release = jest.fn();
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes('FROM commands c')) {
+        return {
+          rows: [
+            {
+              organizationId: 'organization-1',
+              deviceId: 'device-1',
+              externalId: 'relay-1',
+              tenantId: 'demo',
+              status: 'sent',
+            },
+          ],
+        };
+      }
+      if (statement.includes('SET status = $2'))
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              id: 'command-1',
+              organizationId: 'organization-1',
+              deviceId: 'device-1',
+              type: 'relay.set',
+              status: 'failed',
+              expiresAt: '2026-01-01T00:05:00.000Z',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              error: { code: 'RELAY_OFFLINE', message: 'Relay is offline.' },
+            },
+          ],
+        };
+      if (statement.includes('INSERT INTO outbox_events'))
+        return { rowCount: 1, rows: [] };
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release }),
+    };
+
+    await (
+      service as unknown as {
+        consume: (topic: string, payload: Buffer) => Promise<void>;
+      }
+    ).consume(
+      'tenants/demo/devices/relay-1/command-acks',
+      Buffer.from(
+        JSON.stringify({
+          ...commandAckPayload,
+          status: 'failed',
+          error: { code: 'RELAY_OFFLINE', message: 'Relay is offline.' },
+        }),
+      ),
+    );
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('error = $3::jsonb'),
+      [
+        'command-1',
+        'failed',
+        JSON.stringify({ code: 'RELAY_OFFLINE', message: 'Relay is offline.' }),
+      ],
+    );
+  });
+
+  it('does not change a command already finalized by a duplicate acknowledgement', async () => {
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes('FROM commands c')) {
+        return {
+          rows: [
+            {
+              organizationId: 'organization-1',
+              deviceId: 'device-1',
+              externalId: 'relay-1',
+              tenantId: 'demo',
+              status: 'acknowledged',
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release: jest.fn() }),
+    };
+
+    await (
+      service as unknown as {
+        consume: (topic: string, payload: Buffer) => Promise<void>;
+      }
+    ).consume(
+      'tenants/demo/devices/relay-1/command-acks',
+      Buffer.from(JSON.stringify(commandAckPayload)),
+    );
+
+    expect(
+      query.mock.calls.some(([statement]) =>
+        statement.includes('SET status = $2'),
+      ),
+    ).toBe(false);
+    expect(query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  it.each([
+    ['an unknown command', { rows: [] }],
+    [
+      'a cross-tenant acknowledgement',
+      {
+        rows: [
+          {
+            organizationId: 'organization-1',
+            deviceId: 'device-1',
+            externalId: 'relay-1',
+            tenantId: 'other',
+            status: 'sent',
+          },
+        ],
+      },
+    ],
+  ])('rejects and logs %s', async (_name, commandResult) => {
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'ROLLBACK')
+        return { rows: [] };
+      if (statement.includes('FROM commands c')) return commandResult;
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const warn = jest.fn();
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release: jest.fn() }),
+    };
+    (service as unknown as { logger: { warn: jest.Mock } }).logger = { warn };
+
+    await (
+      service as unknown as {
+        consume: (topic: string, payload: Buffer) => Promise<void>;
+      }
+    ).consume(
+      'tenants/demo/devices/relay-1/command-acks',
+      Buffer.from(JSON.stringify(commandAckPayload)),
+    );
+
+    expect(query).toHaveBeenCalledWith('ROLLBACK');
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Rejected command acknowledgement'),
+    );
+    expect(
+      query.mock.calls.some(([statement]) =>
+        statement.includes('SET status = $2'),
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects malformed command acknowledgements before database access', async () => {
+    const service = new WorkerService();
+    const warn = jest.fn();
+    (service as unknown as { logger: { warn: jest.Mock } }).logger = { warn };
+
+    await (
+      service as unknown as {
+        consume: (topic: string, payload: Buffer) => Promise<void>;
+      }
+    ).consume(
+      'tenants/demo/devices/relay-1/command-acks',
+      Buffer.from('{"commandId":"command-1"}'),
+    );
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Rejected command acknowledgement'),
+    );
+  });
+
   it('commits telemetry and its outbox event atomically on one client', async () => {
     const { connect, poolQuery, publish, query, release, service } =
       setupTransaction();
@@ -407,7 +671,7 @@ describe('WorkerService', () => {
 
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('ORDER BY created_at, id'),
-      ['telemetry.persisted', 100],
+      [['telemetry.persisted', 'command.status'], 100],
     );
     expect(updates).toEqual(['event-1', 'event-2']);
     expect(
@@ -486,6 +750,117 @@ describe('WorkerService', () => {
     );
   });
 
+  it('publishes a pending relay command at QoS 1 before marking it sent', async () => {
+    const command = {
+      schemaVersion: '1.0' as const,
+      commandId: 'command-1',
+      nonce: 'nonce-1',
+      tenantId: 'demo',
+      deviceId: 'relay-1',
+      commandType: 'relay.set' as const,
+      issuedAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: '2026-01-01T00:05:00.000Z',
+      payload: { state: 'on' as const },
+    };
+    const release = jest.fn();
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes('SELECT e.id, e.payload')) {
+        return { rows: [{ id: 'outbox-1', payload: command }] };
+      }
+      if (statement.includes('UPDATE commands')) {
+        return { rowCount: 1, rows: [{ status: 'sent' }] };
+      }
+      if (statement.includes('INSERT INTO outbox_events')) {
+        return { rowCount: 1, rows: [] };
+      }
+      if (statement.includes('UPDATE outbox_events')) {
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const publish = jest.fn(
+      (_topic, _payload, _options, callback: (error?: Error) => void) =>
+        callback(),
+    );
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release }),
+    };
+    (service as unknown as { mqtt: { publish: jest.Mock } }).mqtt = { publish };
+
+    await (
+      service as unknown as { relayCommandOutboxBatch: () => Promise<void> }
+    ).relayCommandOutboxBatch();
+
+    expect(publish).toHaveBeenCalledWith(
+      'tenants/demo/devices/relay-1/commands',
+      JSON.stringify(command),
+      { qos: 1 },
+      expect.any(Function),
+    );
+    const sentCall = query.mock.calls.findIndex(([statement]) =>
+      statement.includes('UPDATE commands'),
+    );
+    expect(publish.mock.invocationCallOrder[0]).toBeLessThan(
+      query.mock.invocationCallOrder[sentCall],
+    );
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a command pending when its QoS 1 publish fails', async () => {
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (statement.includes('SELECT e.id, e.payload')) {
+        return {
+          rows: [
+            {
+              id: 'outbox-1',
+              payload: {
+                schemaVersion: '1.0',
+                commandId: 'command-1',
+                nonce: 'nonce-1',
+                tenantId: 'demo',
+                deviceId: 'relay-1',
+                commandType: 'relay.set',
+                issuedAt: '2026-01-01T00:00:00.000Z',
+                expiresAt: '2026-01-01T00:05:00.000Z',
+                payload: { state: 'on' },
+              },
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release: jest.fn() }),
+    };
+    (service as unknown as { mqtt: { publish: jest.Mock } }).mqtt = {
+      publish: jest.fn(
+        (_topic, _payload, _options, callback: (error?: Error) => void) =>
+          callback(new Error('broker unavailable')),
+      ),
+    };
+
+    await expect(
+      (
+        service as unknown as {
+          relayCommandOutboxBatch: () => Promise<void>;
+        }
+      ).relayCommandOutboxBatch(),
+    ).rejects.toThrow('broker unavailable');
+    expect(query).toHaveBeenCalledWith('ROLLBACK');
+    expect(
+      query.mock.calls.some(([statement]) =>
+        statement.includes('UPDATE commands'),
+      ),
+    ).toBe(false);
+  });
+
   it('reconciles stale online devices to offline through the pool', async () => {
     const service = new WorkerService();
     const query = jest.fn().mockResolvedValue({ rowCount: 1, rows: [] });
@@ -501,6 +876,71 @@ describe('WorkerService', () => {
       expect.stringContaining("SET status = 'offline'"),
       [90],
     );
+  });
+
+  it('expires pending and sent commands and suppresses their unpublished outbox events', async () => {
+    const release = jest.fn();
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes("SET status = 'expired'")) {
+        return {
+          rows: [
+            {
+              id: 'command-1',
+              organizationId: 'organization-1',
+              deviceId: 'device-1',
+              type: 'relay.set',
+              status: 'expired',
+              expiresAt: '2026-01-01T00:05:00.000Z',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              error: null,
+            },
+          ],
+        };
+      }
+      if (statement.includes('INSERT INTO outbox_events'))
+        return { rowCount: 1, rows: [] };
+      if (statement.includes('UPDATE outbox_events')) {
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release }),
+    };
+
+    await (
+      service as unknown as {
+        reconcileExpiredCommands: () => Promise<void>;
+      }
+    ).reconcileExpiredCommands();
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("status IN ('pending', 'sent')"),
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('id = ANY($2::uuid[])'),
+      ['mqtt.command.publish', ['command-1']],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO outbox_events'),
+      [
+        expect.any(String),
+        'organization-1',
+        'command.status',
+        expect.objectContaining({
+          // Jest matchers intentionally return unknown-shaped values.
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          command: expect.objectContaining({
+            id: 'command-1',
+            status: 'expired',
+          }),
+        }),
+      ],
+    );
+    expect(query).toHaveBeenCalledWith('COMMIT');
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('keeps disabled, out-of-order, and stale presence from moving backwards', async () => {

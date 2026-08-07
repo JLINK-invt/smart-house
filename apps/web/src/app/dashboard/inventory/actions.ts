@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { accessTokenCookie } from "@/lib/auth";
 import {
   createDevice as createDeviceRequest,
+  createDeviceCommand as createDeviceCommandRequest,
   disableDevice as disableDeviceRequest,
   enableDevice as enableDeviceRequest,
   issueActivationToken as issueActivationTokenRequest,
@@ -13,6 +14,11 @@ import {
   rotateDeviceCredentials as rotateDeviceCredentialsRequest,
   updateDevice as updateDeviceRequest,
 } from "@/lib/api";
+
+export type CommandState = {
+  command?: { id: string; status: string; expiresAt: string };
+  error?: string;
+};
 
 export type ActivationTokenState = {
   token?: string;
@@ -134,4 +140,33 @@ export async function revokeDeviceCredential(
   );
   revalidatePath("/dashboard/inventory");
   redirect("/dashboard/inventory");
+}
+
+export async function issueRelayCommand(
+  organizationId: string,
+  deviceId: string,
+  _previousState: CommandState,
+  formData: FormData,
+): Promise<CommandState> {
+  void _previousState;
+  const state = String(formData.get("state") ?? "");
+  const confirmed = formData.get("confirmed") === "on";
+  if (state !== "on" && state !== "off") {
+    return { error: "Selecciona el estado del relé." };
+  }
+  if (!confirmed) {
+    return { error: "Confirma explícitamente el cambio de estado." };
+  }
+  try {
+    const command = await createDeviceCommandRequest(
+      await accessToken(),
+      organizationId,
+      deviceId,
+      { type: "relay.set", payload: { state }, confirmed },
+    );
+    revalidatePath(`/dashboard/inventory/${organizationId}/${deviceId}`);
+    return { command };
+  } catch {
+    return { error: "No se pudo enviar el comando. Revisa tu permiso o inténtalo más tarde." };
+  }
 }

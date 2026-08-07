@@ -11,6 +11,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ../../packages/database/migrations:/migrations:ro
+      - ../../packages/database/migrate.sh:/migrate.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U smart_house -d smart_house"]
       interval: 5s
