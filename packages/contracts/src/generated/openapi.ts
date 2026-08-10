@@ -106,6 +106,92 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/organizations/{organizationId}/alert-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List alert rules for an authorized organization */
+        get: operations["listOrganizationAlertRules"];
+        put?: never;
+        /** Create an alert rule for an organization device */
+        post: operations["createOrganizationAlertRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/organizations/{organizationId}/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List alerts for an authorized organization */
+        get: operations["listOrganizationAlerts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/organizations/{organizationId}/alerts/{alertId}/{action}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge, resolve, or silence an alert */
+        post: operations["transitionOrganizationAlert"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/organizations/{organizationId}/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the authenticated member's alert notification inbox */
+        get: operations["listOrganizationNotifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/organizations/{organizationId}/notifications/{notificationId}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark an authenticated member's notification as read */
+        post: operations["markOrganizationNotificationRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -115,8 +201,25 @@ export interface components {
             status: "ok";
             /** @constant */
             service: "api";
+        };
+        InboxNotification: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            alertId: string;
+            title: string;
+            body: string;
+            /** @enum {string} */
+            severity: "low" | "medium" | "high" | "critical";
+            data: {
+                [key: string]: unknown;
+            };
             /** Format: date-time */
-            timestamp: string;
+            readAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            timestamp?: string;
         };
         ApiError: {
             statusCode: number;
@@ -165,6 +268,85 @@ export interface components {
             /** @enum {string} */
             resolution: "raw" | "5m" | "1h";
             points: components["schemas"]["TelemetryPoint"][];
+        };
+        CreateAlertRule: components["schemas"]["CreateThresholdAlertRule"] | components["schemas"]["CreateDeviceOfflineAlertRule"];
+        CreateThresholdAlertRule: {
+            /** @enum {string} */
+            type: "threshold";
+            name: string;
+            /** Format: uuid */
+            deviceId: string;
+            metric: string;
+            /** @enum {string} */
+            operator: "gt" | "gte" | "lt" | "lte";
+            threshold: number;
+            /** @default 0 */
+            durationSeconds: number;
+            /** @default 0 */
+            hysteresis: number;
+            /** @default 0 */
+            cooldownSeconds: number;
+            /**
+             * @default medium
+             * @enum {string}
+             */
+            severity: "low" | "medium" | "high" | "critical";
+        };
+        CreateDeviceOfflineAlertRule: {
+            /** @enum {string} */
+            type: "device_offline";
+            name: string;
+            /** Format: uuid */
+            deviceId: string;
+            /** @default 0 */
+            cooldownSeconds: number;
+            /**
+             * @default medium
+             * @enum {string}
+             */
+            severity: "low" | "medium" | "high" | "critical";
+        };
+        AlertRule: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            type: "threshold" | "device_offline";
+            /** Format: uuid */
+            deviceId: string;
+            metric: string;
+            /** @enum {string} */
+            operator: "gt" | "gte" | "lt" | "lte";
+            threshold: number;
+            durationSeconds: number;
+            hysteresis: number;
+            cooldownSeconds: number;
+            /** @enum {string} */
+            severity: "low" | "medium" | "high" | "critical";
+            enabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        Alert: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            ruleId: string;
+            /** Format: uuid */
+            deviceId: string;
+            metric: string;
+            observedValue: number;
+            /** Format: date-time */
+            observedAt: string;
+            message: string;
+            /** @enum {string} */
+            severity: "low" | "medium" | "high" | "critical";
+            /** @enum {string} */
+            state: "open" | "acknowledged" | "resolved" | "silenced";
+            /** Format: date-time */
+            openedAt: string;
+            /** Format: date-time */
+            resolvedAt: string | null;
         };
     };
     responses: never;
@@ -324,6 +506,153 @@ export interface operations {
                 };
                 content: {
                     "text/csv": string;
+                };
+            };
+        };
+    };
+    listOrganizationAlertRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                organizationId: components["parameters"]["OrganizationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Threshold alert rules. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"][];
+                };
+            };
+        };
+    };
+    createOrganizationAlertRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                organizationId: components["parameters"]["OrganizationId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAlertRule"];
+            };
+        };
+        responses: {
+            /** @description Threshold alert rule created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"];
+                };
+            };
+        };
+    };
+    listOrganizationAlerts: {
+        parameters: {
+            query?: {
+                state?: "open" | "acknowledged" | "resolved" | "silenced";
+                severity?: "low" | "medium" | "high" | "critical";
+            };
+            header?: never;
+            path: {
+                organizationId: components["parameters"]["OrganizationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Alerts ordered by opening time. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Alert"][];
+                };
+            };
+        };
+    };
+    transitionOrganizationAlert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                organizationId: components["parameters"]["OrganizationId"];
+                alertId: string;
+                action: "acknowledge" | "resolve" | "silence";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Alert state transition recorded and queued for realtime delivery. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Alert"];
+                };
+            };
+        };
+    };
+    listOrganizationNotifications: {
+        parameters: {
+            query?: {
+                unreadOnly?: boolean;
+            };
+            header?: never;
+            path: {
+                organizationId: components["parameters"]["OrganizationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authorized member inbox and unread count. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        unreadCount: number;
+                        items: components["schemas"]["InboxNotification"][];
+                    };
+                };
+            };
+        };
+    };
+    markOrganizationNotificationRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                organizationId: components["parameters"]["OrganizationId"];
+                notificationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Notification marked read. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxNotification"];
                 };
             };
         };

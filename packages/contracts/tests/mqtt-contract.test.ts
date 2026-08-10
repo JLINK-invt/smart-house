@@ -10,6 +10,7 @@ import {
   relayCommandSchema,
   telemetrySchema,
 } from '../src/mqtt';
+import { createAlertRuleSchema, listNotificationsQuerySchema } from '../src/alerts';
 
 const examples = '../../contracts/examples/telemetry/v1';
 const readExample = (name: string) =>
@@ -84,4 +85,62 @@ test('parses bounded command acknowledgements with the shared schema', () => {
     () => parseCommandAckPayload('x'.repeat(maxCommandAckPayloadBytes + 1)),
     /exceeds 8192 bytes/,
   );
+});
+
+test('accepts only finite threshold alert rule inputs', () => {
+  const rule = {
+    name: 'High kitchen temperature',
+    deviceId: '2d77bf2a-cad4-4951-ae4c-9b21de4b11fe',
+    metric: 'temperature',
+    operator: 'gt',
+    threshold: 30,
+    durationSeconds: 60,
+    hysteresis: 0.5,
+    cooldownSeconds: 120,
+  };
+  assert.deepEqual(createAlertRuleSchema.parse(rule), {
+    ...rule,
+    type: 'threshold',
+    severity: 'medium',
+  });
+  assert.deepEqual(
+    createAlertRuleSchema.parse({
+      name: rule.name,
+      deviceId: rule.deviceId,
+      metric: rule.metric,
+      operator: rule.operator,
+      threshold: rule.threshold,
+      type: 'threshold',
+    }),
+    {
+      name: rule.name,
+      deviceId: rule.deviceId,
+      metric: rule.metric,
+      operator: rule.operator,
+      threshold: rule.threshold,
+      type: 'threshold',
+      durationSeconds: 0,
+      hysteresis: 0,
+      cooldownSeconds: 0,
+      severity: 'medium',
+    },
+  );
+  assert.equal(
+    createAlertRuleSchema.safeParse({ ...rule, threshold: Infinity }).success,
+    false,
+  );
+  assert.equal(
+    createAlertRuleSchema.safeParse({ ...rule, operator: 'above' }).success,
+    false,
+  );
+  assert.equal(
+    createAlertRuleSchema.safeParse({ ...rule, cooldownSeconds: -1 }).success,
+    false,
+  );
+});
+
+test('accepts only explicit notification inbox filters', () => {
+  assert.equal(listNotificationsQuerySchema.safeParse({ unreadOnly: 'true' }).success, true);
+  assert.equal(listNotificationsQuerySchema.safeParse({ unreadOnly: 'yes' }).success, false);
+  assert.equal(listNotificationsQuerySchema.safeParse({ unexpected: 'true' }).success, false);
 });

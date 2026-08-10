@@ -54,6 +54,20 @@ const schema = z.object({
     .positive()
     .max(1_000)
     .default(100),
+  NOTIFICATION_POLL_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1_000),
+  NOTIFICATION_BATCH_SIZE: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100)
+    .default(25),
+  SMTP_HOST: z.string().min(1).default('localhost'),
+  SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(1025),
+  SMTP_FROM: z.string().email().default('alerts@smart-house.local'),
   SIMULATOR_TENANT_ID: z.string().min(1).default('demo'),
   DEVICE_ONLINE_GRACE_PERIOD_SECONDS: z.coerce
     .number()

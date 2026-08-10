@@ -23,6 +23,11 @@
 | Worker | `TELEMETRY_OUTBOX_BATCH_SIZE` | No | `100` | Plataforma |
 | Worker | `MQTT_SESSION_EXPIRY_SECONDS` | No | `3600` | Plataforma |
 | Worker | `MQTT_RECONNECT_PERIOD_MS` | No | `1000` | Plataforma |
+| Worker | `NOTIFICATION_POLL_INTERVAL_MS` | No | `1000` | Plataforma |
+| Worker | `NOTIFICATION_BATCH_SIZE` | No | `25` | Plataforma |
+| Worker | `SMTP_HOST` | No | `localhost` | Plataforma |
+| Worker | `SMTP_PORT` | No | `1025` | Plataforma |
+| Worker | `SMTP_FROM` | No | `alerts@smart-house.local` | Plataforma |
 | Simulador | `MQTT_SESSION_EXPIRY_SECONDS` | No | `3600` | Plataforma |
 | Simulador | `MQTT_RECONNECT_PERIOD_MS` | No | `1000` | Plataforma |
 
@@ -46,6 +51,10 @@ un evento. Los consumidores del Stream deben deduplicar por el `eventId`
 estable (el UUID del outbox); `correlationId` conserva el `messageId` original.
 PubSub mantiene la actualización en tiempo real, mientras el Stream permite
 recuperar eventos después de una interrupción.
+
+## Notificaciones de alertas
+
+Cada apertura o transición de alerta inserta un trabajo durable con una clave de idempotencia (`alert:<id>:<evento>`). El worker reclama trabajos con bloqueo, reintento exponencial (5 segundos a una hora), máximo de ocho intentos y dead-letter persistente. Materializa una notificación in-app solo para membresías activas y publica su evento realtime al socket privado del destinatario. Alertas `high` y `critical` también crean un registro de entrega de correo único por trabajo/destinatario y usan SMTP sin autenticación; localmente Mailpit escucha `localhost:1025` y muestra mensajes en `http://localhost:8025`. `SMTP_HOST`, `SMTP_PORT` y `SMTP_FROM` permiten cambiar el relay sin proveedor ni secretos.
 
 ## Sesiones MQTT
 

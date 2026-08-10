@@ -7,7 +7,10 @@ import {
 import Redis from 'ioredis';
 import type { Server, Socket } from 'socket.io';
 import { z } from 'zod';
-import { commandStatusEventSchema } from '@smart-house/contracts';
+import {
+  alertStatusEventSchema,
+  commandStatusEventSchema,
+} from '@smart-house/contracts';
 import { readEnvironment } from '../config/environment';
 import { IdentityService } from '../identity/identity.service';
 import { OrganizationsService } from '../organizations/organizations.service';
@@ -20,6 +23,17 @@ const persistedTelemetryEventSchema = z.object({
   telemetry: z.object({ deviceId: z.string().min(1).max(128) }).passthrough(),
 });
 const commandStatusTopic = 'command.status';
+const alertStatusTopic = 'alert.status';
+const notificationInboxTopic = 'notification.inbox';
+const notificationInboxEventSchema = z.object({
+  eventId: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  recipientId: z.string().uuid(),
+  notificationId: z.string().uuid(),
+  alertId: z.string().uuid(),
+  severity: z.enum(['low', 'medium', 'high', 'critical']),
+  body: z.string(),
+});
 
 const deviceSubscriptionSchema = z.object({
   organizationId: z.string().min(1),
@@ -34,6 +48,7 @@ const organizationRoom = (organizationId: string) =>
   `organization:${organizationId}`;
 const deviceRoom = (organizationId: string, deviceId: string) =>
   `${organizationRoom(organizationId)}:device:${deviceId}`;
+const userRoom = (userId: string) => `user:${userId}`;
 
 @WebSocketGateway({
   namespace: '/spike',
@@ -55,11 +70,19 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.redis.subscribe('telemetry.persisted', commandStatusTopic);
+    await this.redis.subscribe(
+      'telemetry.persisted',
+      commandStatusTopic,
+      alertStatusTopic,
+      notificationInboxTopic,
+    );
     this.redis.on('message', (channel, payload) => {
       if (channel === 'telemetry.persisted') this.handleRedisMessage(payload);
       if (channel === commandStatusTopic)
         this.handleCommandStatusMessage(payload);
+      if (channel === alertStatusTopic) this.handleAlertStatusMessage(payload);
+      if (channel === notificationInboxTopic)
+        this.handleNotificationInboxMessage(payload);
     });
   }
 
@@ -70,14 +93,16 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
       return;
     }
     try {
+      const identity = await this.identityService.verify(accessToken);
       const organizations = new Set(
-        await this.organizationsService.activeOrganizationIds(
-          await this.identityService.verify(accessToken),
-        ),
+        await this.organizationsService.activeOrganizationIds(identity),
       );
       this.socketOrganizations.set(client.id, organizations);
       for (const organizationId of organizations)
         void client.join(organizationRoom(organizationId));
+      void client.join(
+        userRoom(await this.organizationsService.userId(identity)),
+      );
     } catch {
       client.disconnect();
     }
@@ -155,5 +180,44 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
         deviceRoom(event.data.organizationId, event.data.deviceId),
       ])
       .emit(commandStatusTopic, event.data);
+  }
+
+  private handleAlertStatusMessage(payload: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      this.logger.warn('Ignored invalid Redis alert status event.');
+      return;
+    }
+    const event = alertStatusEventSchema.safeParse(parsed);
+    if (!event.success) {
+      this.logger.warn('Ignored invalid Redis alert status event.');
+      return;
+    }
+    this.server
+      .to([
+        organizationRoom(event.data.organizationId),
+        deviceRoom(event.data.organizationId, event.data.deviceId),
+      ])
+      .emit(alertStatusTopic, event.data);
+  }
+
+  private handleNotificationInboxMessage(payload: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      this.logger.warn('Ignored invalid Redis inbox notification.');
+      return;
+    }
+    const event = notificationInboxEventSchema.safeParse(parsed);
+    if (!event.success) {
+      this.logger.warn('Ignored invalid Redis inbox notification.');
+      return;
+    }
+    this.server
+      .to(userRoom(event.data.recipientId))
+      .emit(notificationInboxTopic, event.data);
   }
 }

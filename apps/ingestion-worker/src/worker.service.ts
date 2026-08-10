@@ -16,6 +16,7 @@ import {
 import { readFileSync } from 'node:fs';
 import Redis from 'ioredis';
 import { connect, type MqttClient } from 'mqtt';
+import nodemailer from 'nodemailer';
 import { Pool, type PoolClient } from 'pg';
 import { readWorkerConfig } from './config';
 import {
@@ -28,6 +29,8 @@ const commandAckTopic = 'tenants/+/devices/+/command-acks';
 const persistedTelemetryTopic = 'telemetry.persisted';
 const commandPublishOutboxTopic = 'mqtt.command.publish';
 const commandStatusOutboxTopic = 'command.status';
+const alertStatusOutboxTopic = 'alert.status';
+const notificationInboxOutboxTopic = 'notification.inbox';
 
 type OutboxRow = {
   id: string;
@@ -51,6 +54,19 @@ type CommandStatusRow = CommandStatusEvent['command'] & {
   deviceId: string;
 };
 
+type ThresholdRule = {
+  id: string;
+  name: string;
+  metric: string;
+  operator: 'gt' | 'gte' | 'lt' | 'lte';
+  threshold: number;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  durationSeconds: number;
+  hysteresis: number;
+  cooldownSeconds: number;
+  conditionStartedAt: string | null;
+};
+
 @Injectable()
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkerService.name);
@@ -61,8 +77,10 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private reconciliationTimer?: NodeJS.Timeout;
   private outboxTimer?: NodeJS.Timeout;
   private commandOutboxTimer?: NodeJS.Timeout;
+  private notificationTimer?: NodeJS.Timeout;
   private activeOutboxRelay?: Promise<void>;
   private activeCommandOutboxRelay?: Promise<void>;
+  private activeNotificationRelay?: Promise<void>;
 
   async onModuleInit(): Promise<void> {
     this.database = new Pool({ connectionString: this.config.DATABASE_URL });
@@ -75,6 +93,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     this.connectMqtt();
     this.startOutboxRelay();
     this.startCommandOutboxRelay();
+    this.startNotificationRelay();
     this.reconciliationTimer = setInterval(
       () => void this.reconcileStatuses(),
       this.config.DEVICE_STATUS_RECONCILIATION_INTERVAL_MS,
@@ -86,11 +105,13 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
     if (this.outboxTimer) clearInterval(this.outboxTimer);
     if (this.commandOutboxTimer) clearInterval(this.commandOutboxTimer);
+    if (this.notificationTimer) clearInterval(this.notificationTimer);
     await new Promise<void>(
       (resolve) => this.mqtt?.end(false, {}, () => resolve()) ?? resolve(),
     );
     await this.activeOutboxRelay;
     await this.activeCommandOutboxRelay;
+    await this.activeNotificationRelay;
     await this.database?.end();
     await this.redis?.quit();
   }
@@ -350,12 +371,25 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
             telemetry.timeQuality,
           ],
         );
+        if (result.rowCount === 1) {
+          await this.evaluateThresholdAlerts(
+            client,
+            organizationId,
+            device.id,
+            reading.metric,
+            typeof reading.value === 'boolean'
+              ? Number(reading.value)
+              : reading.value,
+            telemetry.occurredAt,
+          );
+        }
         newlyPersisted ||= result.rowCount === 1;
       }
 
       if (newlyPersisted) {
         await this.updateDevicePresence(
           client,
+          organizationId,
           device.id,
           telemetry.occurredAt,
         );
@@ -438,14 +472,19 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       await client.query('BEGIN');
       const result = await client.query<OutboxRow>(
-        `SELECT id, payload
+        `SELECT id, payload, topic
          FROM outbox_events
          WHERE processed_at IS NULL AND topic = ANY($1)
          ORDER BY created_at, id
          LIMIT $2
          FOR UPDATE SKIP LOCKED`,
         [
-          [persistedTelemetryTopic, commandStatusOutboxTopic],
+          [
+            persistedTelemetryTopic,
+            commandStatusOutboxTopic,
+            alertStatusOutboxTopic,
+            notificationInboxOutboxTopic,
+          ],
           this.config.TELEMETRY_OUTBOX_BATCH_SIZE,
         ],
       );
@@ -685,23 +724,250 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
   private async updateDevicePresence(
     client: PoolClient,
+    organizationId: string,
     deviceId: string,
     occurredAt: string,
   ): Promise<void> {
-    await client.query(
-      `UPDATE devices
-       SET last_seen_at = GREATEST(COALESCE(last_seen_at, '-infinity'::timestamptz), $2::timestamptz),
-           status = CASE
-             WHEN status = 'disabled' THEN 'disabled'
-             WHEN $2::timestamptz >= now() - ($3 * interval '1 second')
-                  AND $2::timestamptz >= COALESCE(last_seen_at, '-infinity'::timestamptz)
-               THEN 'online'
-             ELSE status
-           END,
-           updated_at = now()
-       WHERE id = $1`,
-      [deviceId, occurredAt, this.config.DEVICE_ONLINE_GRACE_PERIOD_SECONDS],
+    const result = await client.query<{
+      previousStatus: string;
+      status: string;
+    }>(
+      `WITH previous AS (
+         SELECT status FROM devices
+         WHERE id = $1 AND organization_id = $2
+         FOR UPDATE
+       )
+       UPDATE devices d
+        SET last_seen_at = GREATEST(COALESCE(d.last_seen_at, '-infinity'::timestamptz), $3::timestamptz),
+            status = CASE
+              WHEN d.status = 'disabled' THEN 'disabled'
+              WHEN $3::timestamptz >= now() - ($4 * interval '1 second')
+                   AND $3::timestamptz >= COALESCE(d.last_seen_at, '-infinity'::timestamptz)
+                THEN 'online'
+              ELSE d.status
+            END,
+            updated_at = now()
+       FROM previous
+       WHERE d.id = $1 AND d.organization_id = $2
+       RETURNING previous.status AS "previousStatus", d.status`,
+      [
+        deviceId,
+        organizationId,
+        occurredAt,
+        this.config.DEVICE_ONLINE_GRACE_PERIOD_SECONDS,
+      ],
     );
+    if (
+      result.rows[0]?.previousStatus === 'offline' &&
+      result.rows[0].status === 'online'
+    ) {
+      await this.resolveDeviceOfflineAlerts(
+        client,
+        organizationId,
+        deviceId,
+        occurredAt,
+      );
+    }
+  }
+
+  private async evaluateThresholdAlerts(
+    client: PoolClient,
+    organizationId: string,
+    deviceId: string,
+    metric: string,
+    observedValue: number,
+    observedAt: string,
+  ): Promise<void> {
+    const rules = await client.query<ThresholdRule>(
+      `SELECT id, name, metric, operator, threshold, severity,
+              duration_seconds AS "durationSeconds", hysteresis,
+              cooldown_seconds AS "cooldownSeconds",
+              condition_started_at AS "conditionStartedAt"
+       FROM alert_rules
+       WHERE organization_id = $1 AND device_id = $2 AND metric = $3 AND enabled
+       FOR UPDATE`,
+      [organizationId, deviceId, metric],
+    );
+
+    for (const rule of rules.rows) {
+      const open = await client.query<{ id: string }>(
+        `SELECT id FROM alerts
+         WHERE organization_id = $1 AND rule_id = $2 AND device_id = $3
+           AND state = 'open'
+         FOR UPDATE`,
+        [organizationId, rule.id, deviceId],
+      );
+
+      if (open.rows[0]) {
+        if (!this.hasRecovered(rule, observedValue)) continue;
+        await client.query(
+          `UPDATE alerts SET state = 'resolved', resolved_at = $4::timestamptz
+           WHERE organization_id = $1 AND rule_id = $2 AND device_id = $3
+             AND state = 'open' AND opened_at <= $4::timestamptz`,
+          [organizationId, rule.id, deviceId, observedAt],
+        );
+        await client.query(
+          `UPDATE alert_rules SET condition_started_at = NULL
+           WHERE id = $1 AND organization_id = $2
+             AND (condition_started_at IS NULL OR condition_started_at <= $3::timestamptz)`,
+          [rule.id, organizationId, observedAt],
+        );
+        continue;
+      }
+
+      if (!this.hasBreached(rule, observedValue)) {
+        await client.query(
+          `UPDATE alert_rules SET condition_started_at = NULL
+           WHERE id = $1 AND organization_id = $2
+             AND (condition_started_at IS NULL OR condition_started_at <= $3::timestamptz)`,
+          [rule.id, organizationId, observedAt],
+        );
+        continue;
+      }
+
+      const conditionStartedAt = rule.conditionStartedAt ?? observedAt;
+      if (!rule.conditionStartedAt) {
+        await client.query(
+          `UPDATE alert_rules SET condition_started_at = $3::timestamptz
+           WHERE id = $1 AND organization_id = $2`,
+          [rule.id, organizationId, observedAt],
+        );
+      }
+      if (
+        Date.parse(observedAt) - Date.parse(conditionStartedAt) <
+        rule.durationSeconds * 1_000
+      ) {
+        continue;
+      }
+
+      const openedAlert = await client.query<{ id: string }>(
+        `INSERT INTO alerts
+           (organization_id, device_id, rule_id, severity, metric, observed_value,
+            observed_at, message, opened_at)
+          SELECT r.organization_id, r.device_id, r.id, r.severity, r.metric, $4::double precision,
+                $5::timestamptz,
+                 'Rule "' || r.name || '": observed ' || ($4::double precision)::text || ' for ' || r.metric ||
+                  ' crossed ' || r.operator || ' threshold ' || r.threshold,
+                $5::timestamptz
+         FROM alert_rules r
+         WHERE r.id = $1 AND r.organization_id = $2 AND r.device_id = $3
+           AND NOT EXISTS (
+             SELECT 1 FROM alerts a
+             WHERE a.organization_id = $2 AND a.rule_id = r.id AND a.device_id = $3
+               AND a.state = 'resolved'
+               AND a.resolved_at > $5::timestamptz -
+                 (r.cooldown_seconds * interval '1 second')
+           )
+          ON CONFLICT (rule_id, device_id) WHERE state = 'open' DO NOTHING
+          RETURNING id`,
+        [rule.id, organizationId, deviceId, observedValue, observedAt],
+      );
+      if (openedAlert.rows[0])
+        await this.enqueueAlertNotification(
+          client,
+          organizationId,
+          openedAlert.rows[0].id,
+          'open',
+        );
+    }
+  }
+
+  private async openDeviceOfflineAlerts(
+    client: PoolClient,
+    organizationId: string,
+    deviceId: string,
+  ): Promise<void> {
+    const openedAlerts = await client.query<{ id: string }>(
+      `INSERT INTO alerts
+         (organization_id, device_id, rule_id, severity, metric, observed_value,
+          observed_at, message, opened_at)
+       SELECT r.organization_id, r.device_id, r.id, r.severity, 'device_status', 0,
+              now(), 'Rule "' || r.name || '": device is offline', now()
+       FROM alert_rules r
+       WHERE r.organization_id = $1 AND r.device_id = $2
+         AND r.rule_type = 'device_offline' AND r.enabled
+         AND NOT EXISTS (
+           SELECT 1 FROM alerts a
+           WHERE a.organization_id = $1 AND a.rule_id = r.id AND a.device_id = $2
+             AND a.state = 'resolved'
+             AND a.resolved_at > now() - (r.cooldown_seconds * interval '1 second')
+         )
+       ON CONFLICT (rule_id, device_id) WHERE state = 'open' DO NOTHING
+        RETURNING id`,
+      [organizationId, deviceId],
+    );
+    for (const alert of openedAlerts.rows)
+      await this.enqueueAlertNotification(
+        client,
+        organizationId,
+        alert.id,
+        'open',
+      );
+  }
+
+  private async enqueueAlertNotification(
+    client: PoolClient,
+    organizationId: string,
+    alertId: string,
+    event: string,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO notification_jobs (organization_id, topic, payload, idempotency_key)
+        SELECT $1, 'alert.notification',
+               jsonb_build_object('alertId', a.id, 'event', $3::text, 'severity', a.severity,
+                 'message', a.message, 'deviceId', a.device_id),
+               'alert:' || a.id::text || ':' || $3::text
+       FROM alerts a WHERE a.id = $2 AND a.organization_id = $1
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [organizationId, alertId, event],
+    );
+  }
+
+  private async resolveDeviceOfflineAlerts(
+    client: PoolClient,
+    organizationId: string,
+    deviceId: string,
+    resolvedAt: string,
+  ): Promise<void> {
+    await client.query(
+      `UPDATE alerts a SET state = 'resolved', resolved_at = $3::timestamptz
+       FROM alert_rules r
+       WHERE a.organization_id = $1 AND a.device_id = $2 AND a.state = 'open'
+         AND a.rule_id = r.id AND r.organization_id = $1
+         AND r.rule_type = 'device_offline'
+         AND a.opened_at <= $3::timestamptz`,
+      [organizationId, deviceId, resolvedAt],
+    );
+  }
+
+  private hasBreached(rule: ThresholdRule, value: number): boolean {
+    switch (rule.operator) {
+      case 'gt':
+        return value > rule.threshold;
+      case 'gte':
+        return value >= rule.threshold;
+      case 'lt':
+        return value < rule.threshold;
+      case 'lte':
+        return value <= rule.threshold;
+    }
+  }
+
+  private hasRecovered(rule: ThresholdRule, value: number): boolean {
+    const resetThreshold =
+      rule.operator === 'gt' || rule.operator === 'gte'
+        ? rule.threshold - rule.hysteresis
+        : rule.threshold + rule.hysteresis;
+    switch (rule.operator) {
+      case 'gt':
+        return value <= resetThreshold;
+      case 'gte':
+        return value < resetThreshold;
+      case 'lt':
+        return value >= resetThreshold;
+      case 'lte':
+        return value > resetThreshold;
+    }
   }
 
   private async reconcileStatuses(): Promise<void> {
@@ -754,21 +1020,259 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reconcileDeviceStatuses(): Promise<void> {
+    const client = await this.databaseOrThrow().connect();
     try {
-      const result = await this.databaseOrThrow().query(
-        `UPDATE devices SET status = 'offline', updated_at = now()
+      await client.query('BEGIN');
+      const result = await client.query<{ organizationId: string; id: string }>(
+        `UPDATE devices
+         SET status = 'offline', updated_at = now()
          WHERE status = 'online'
-           AND (last_seen_at IS NULL OR last_seen_at < now() - ($1 * interval '1 second'))`,
+           AND (last_seen_at IS NULL OR last_seen_at < now() - ($1 * interval '1 second'))
+         RETURNING organization_id AS "organizationId", id`,
         [this.config.DEVICE_ONLINE_GRACE_PERIOD_SECONDS],
       );
+      for (const device of result.rows) {
+        await this.openDeviceOfflineAlerts(
+          client,
+          device.organizationId,
+          device.id,
+        );
+      }
+      await client.query('COMMIT');
       if (result.rowCount) {
         this.logger.log(`Marked ${result.rowCount} stale device(s) offline.`);
       }
     } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        this.logger.error(
+          'Failed to roll back device presence reconciliation.',
+          rollbackError instanceof Error ? rollbackError.stack : undefined,
+        );
+      }
       this.logger.error(
         'Failed to reconcile device presence.',
         error instanceof Error ? error.stack : undefined,
       );
+    } finally {
+      client.release();
+    }
+  }
+
+  private startNotificationRelay(): void {
+    this.notificationTimer = setInterval(
+      () => void this.runNotificationRelay(),
+      this.config.NOTIFICATION_POLL_INTERVAL_MS,
+    );
+    void this.runNotificationRelay();
+  }
+
+  private runNotificationRelay(): Promise<void> {
+    if (this.activeNotificationRelay) return this.activeNotificationRelay;
+    const relay = this.relayNotificationBatch()
+      .catch((error: unknown) =>
+        this.logger.error(
+          'Failed to relay notification jobs.',
+          error instanceof Error ? error.stack : undefined,
+        ),
+      )
+      .finally(() => {
+        if (this.activeNotificationRelay === relay)
+          this.activeNotificationRelay = undefined;
+      });
+    this.activeNotificationRelay = relay;
+    return relay;
+  }
+
+  private async relayNotificationBatch(): Promise<void> {
+    for (
+      let count = 0;
+      count < this.config.NOTIFICATION_BATCH_SIZE;
+      count += 1
+    ) {
+      const job = await this.claimNotificationJob();
+      if (!job) return;
+      try {
+        await this.deliverNotification(job);
+        await this.databaseOrThrow().query(
+          `UPDATE notification_jobs SET status = 'completed', completed_at = now(), locked_at = NULL
+           WHERE id = $1`,
+          [job.id],
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'unknown delivery failure';
+        await this.databaseOrThrow().query(
+          `UPDATE notification_jobs
+           SET status = CASE WHEN attempts >= max_attempts THEN 'dead_letter' ELSE 'pending' END,
+               available_at = CASE WHEN attempts >= max_attempts THEN available_at
+                 ELSE now() + (LEAST(3600, power(2, attempts) * 5) * interval '1 second') END,
+               locked_at = NULL, last_error = $2,
+               dead_lettered_at = CASE WHEN attempts >= max_attempts THEN now() ELSE NULL END
+           WHERE id = $1`,
+          [job.id, message],
+        );
+      }
+    }
+  }
+
+  private async claimNotificationJob(): Promise<{
+    id: string;
+    organizationId: string;
+    payload: {
+      alertId: string;
+      event: string;
+      severity: string;
+      message: string;
+      deviceId: string;
+    };
+  } | null> {
+    const result = await this.databaseOrThrow().query<{
+      id: string;
+      organizationId: string;
+      payload: {
+        alertId: string;
+        event: string;
+        severity: string;
+        message: string;
+        deviceId: string;
+      };
+    }>(
+      `WITH next AS (
+         SELECT id FROM notification_jobs
+         WHERE (status = 'pending' AND available_at <= now())
+            OR (status = 'processing' AND locked_at < now() - interval '5 minutes')
+         ORDER BY available_at, created_at FOR UPDATE SKIP LOCKED LIMIT 1
+       )
+       UPDATE notification_jobs j SET status = 'processing', attempts = attempts + 1, locked_at = now()
+       FROM next WHERE j.id = next.id
+       RETURNING j.id, j.organization_id AS "organizationId", j.payload`,
+    );
+    return result.rows[0] ?? null;
+  }
+
+  private async deliverNotification(job: {
+    id: string;
+    organizationId: string;
+    payload: {
+      alertId: string;
+      event: string;
+      severity: string;
+      message: string;
+      deviceId: string;
+    };
+  }): Promise<void> {
+    const client = await this.databaseOrThrow().connect();
+    let recipients: { id: string; email: string }[] = [];
+    try {
+      await client.query('BEGIN');
+      const inbox = await client.query<{ id: string; recipientId: string }>(
+        `INSERT INTO in_app_notifications
+           (organization_id, recipient_id, alert_id, event_key, title, body, severity, data)
+          SELECT $1::uuid, m.user_id, $2::uuid, $3::text, 'Alert ' || $4::text, $5::text, $4::text,
+                 jsonb_build_object('alertId', $2::uuid, 'event', $6::text, 'deviceId', $7::uuid)
+         FROM memberships m WHERE m.organization_id = $1::uuid AND m.status = 'active'
+         ON CONFLICT (recipient_id, event_key) DO NOTHING
+         RETURNING id, recipient_id AS "recipientId"`,
+        [
+          job.organizationId,
+          job.payload.alertId,
+          `alert:${job.payload.alertId}:${job.payload.event}`,
+          job.payload.severity,
+          job.payload.message,
+          job.payload.event,
+          job.payload.deviceId,
+        ],
+      );
+      for (const notification of inbox.rows) {
+        await client.query(
+          `INSERT INTO outbox_events (organization_id, topic, payload)
+            VALUES ($1, $2, jsonb_build_object('notificationId', $3::uuid, 'recipientId', $4::uuid, 'alertId', $5::uuid,
+              'severity', $6::text, 'body', $7::text))`,
+          [
+            job.organizationId,
+            notificationInboxOutboxTopic,
+            notification.id,
+            notification.recipientId,
+            job.payload.alertId,
+            job.payload.severity,
+            job.payload.message,
+          ],
+        );
+      }
+      const result = await client.query<{ id: string; email: string }>(
+        `SELECT u.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id
+         WHERE m.organization_id = $1 AND m.status = 'active'`,
+        [job.organizationId],
+      );
+      recipients = result.rows;
+      if (['high', 'critical'].includes(job.payload.severity)) {
+        await client.query(
+          `INSERT INTO notification_deliveries (job_id, recipient_id, channel, message_id)
+            SELECT $1::uuid, u.id, 'email', 'alert-' || ($1::uuid)::text || '-' || u.id::text || '@smart-house.local'
+            FROM memberships m JOIN users u ON u.id = m.user_id
+            WHERE m.organization_id = $2::uuid AND m.status = 'active'
+           ON CONFLICT (job_id, recipient_id, channel) DO NOTHING`,
+          [job.id, job.organizationId],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (!['high', 'critical'].includes(job.payload.severity)) return;
+    for (const recipient of recipients)
+      await this.sendAlertEmail(job, recipient);
+  }
+
+  private async sendAlertEmail(
+    job: {
+      id: string;
+      payload: { severity: string; message: string; alertId: string };
+    },
+    recipient: { id: string; email: string },
+  ): Promise<void> {
+    const delivery = await this.databaseOrThrow().query<{
+      id: string;
+      messageId: string;
+    }>(
+      `UPDATE notification_deliveries SET status = 'sending'
+       WHERE job_id = $1 AND recipient_id = $2 AND channel = 'email' AND status IN ('pending', 'failed')
+       RETURNING id, message_id AS "messageId"`,
+      [job.id, recipient.id],
+    );
+    if (!delivery.rows[0]) return;
+    try {
+      await nodemailer
+        .createTransport({
+          host: this.config.SMTP_HOST,
+          port: this.config.SMTP_PORT,
+          secure: false,
+        })
+        .sendMail({
+          from: this.config.SMTP_FROM,
+          to: recipient.email,
+          subject: `[${job.payload.severity.toUpperCase()}] Smart House alert`,
+          text: `${job.payload.message}\n\nAlert: ${job.payload.alertId}`,
+          messageId: `<${delivery.rows[0].messageId}>`,
+        });
+      await this.databaseOrThrow().query(
+        `UPDATE notification_deliveries SET status = 'sent', sent_at = now(), last_error = NULL WHERE id = $1`,
+        [delivery.rows[0].id],
+      );
+    } catch (error) {
+      await this.databaseOrThrow().query(
+        `UPDATE notification_deliveries SET status = 'failed', last_error = $2 WHERE id = $1`,
+        [
+          delivery.rows[0].id,
+          error instanceof Error ? error.message : 'SMTP delivery failed',
+        ],
+      );
+      throw error;
     }
   }
 

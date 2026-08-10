@@ -1,5 +1,15 @@
 import { expect, test } from '@playwright/test';
 
+const e2eUsername = process.env.PLAYWRIGHT_E2E_USERNAME;
+const e2ePassword = process.env.PLAYWRIGHT_E2E_PASSWORD;
+
+async function openDashboardNavigation(page: import('@playwright/test').Page) {
+  const menuButton = page.getByRole('button', { name: 'Menu' });
+  if (await menuButton.isVisible()) {
+    await menuButton.click();
+  }
+}
+
 test('renders the Smart House product landing page', async ({ page }) => {
   await page.goto('/');
 
@@ -11,53 +21,31 @@ test('renders the Smart House product landing page', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Todo lo necesario para operar una flota conectada.' })).toBeVisible();
 });
 
-test('opens the dashboard through the preview login', async ({ page }) => {
-  await page.goto('/login');
-  await page.getByLabel('Correo electrónico').fill('demo@smart-house.local');
-  await page.getByLabel('Contraseña').fill('preview-session');
-  await page.getByRole('button', { name: 'Acceder en modo vista previa →' }).click();
-
-  await expect(page).toHaveURL('/dashboard');
-  await expect(page.getByText('Resumen en vivo')).toBeVisible();
-});
-
-test('protects the dashboard route until a session exists', async ({ page }) => {
+test('redirects an unauthenticated dashboard request to the landing page', async ({ page }) => {
   await page.goto('/dashboard');
   await expect(page).toHaveURL('/');
-
-  await page.context().addCookies([
-    {
-      name: 'smart-house-session',
-      value: 'test-session',
-      url: 'http://localhost:3100',
-    },
-  ]);
-  await page.goto('/dashboard');
-
-  await expect(
-    page.getByRole('heading', { name: 'Listo para conectar tu flota.' }),
-  ).not.toBeVisible();
-  await expect(
-    page.getByRole('heading', { name: 'La plataforma ya tiene pulso.' }),
-  ).toBeVisible();
-  await expect(page.getByText('2 dispositivos', { exact: true })).toBeVisible();
-  await expect(page.getByText('Comandos', { exact: true })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Telemetría del spike' })).toBeVisible();
-  await expect(page.getByText('28.4 °C', { exact: true })).toBeVisible();
 });
 
-test('navigates dashboard features from the expandable menu', async ({ page }) => {
-  await page.context().addCookies([
-    { name: 'smart-house-session', value: 'test-session', url: 'http://localhost:3100' },
-  ]);
-  await page.goto('/dashboard');
+test('opens the alert center after Keycloak login', async ({ page }) => {
+  test.skip(
+    !e2eUsername || !e2ePassword,
+    'Requires PLAYWRIGHT_E2E_USERNAME and PLAYWRIGHT_E2E_PASSWORD for a Keycloak account.',
+  );
 
-  const menuButton = page.getByRole('button', { name: 'Menu' });
-  if (await menuButton.isVisible()) {
-    await menuButton.click();
-  }
-  await page.getByRole('link', { name: 'Dispositivos' }).click();
+  await page.goto('/login');
+  await page.getByRole('link', { name: /Continuar con Keycloak/ }).click();
 
-  await expect(page).toHaveURL('/dashboard/inventory');
-  await expect(page.getByRole('heading', { name: 'Gestión de dispositivos' })).toBeVisible();
+  await page.locator('input[name="username"]').fill(e2eUsername!);
+  await page.locator('input[name="password"]').fill(e2ePassword!);
+  await page.locator('#kc-login').click();
+
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await openDashboardNavigation(page);
+  await page.getByRole('link', { name: 'Alertas' }).click();
+
+  await expect(page).toHaveURL(/\/dashboard\/alerts$/);
+  await expect(page.getByRole('heading', { name: 'Centro de alertas' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Alertas por organización' })).toBeVisible();
+  await expect(page.getByLabel('Estado')).toBeVisible();
+  await expect(page.getByLabel('Severidad')).toBeVisible();
 });

@@ -31,3 +31,25 @@ export const commandStatusEventSchema = z.object({
 });
 
 export type CommandStatusEvent = z.infer<typeof commandStatusEventSchema>;
+
+export const alertStatusEventSchema = z.object({
+  eventId: z.string().uuid(),
+  correlationId: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  deviceId: z.string().uuid(),
+  alert: z.object({
+    id: z.string().uuid(),
+    ruleId: z.string().uuid(),
+    deviceId: z.string().uuid(),
+    metric: z.string().min(1),
+    observedValue: z.number(),
+    observedAt: z.string().datetime(),
+    message: z.string().min(1),
+    severity: z.enum(['low', 'medium', 'high', 'critical']),
+    state: z.enum(['open', 'acknowledged', 'resolved', 'silenced']),
+    openedAt: z.string().datetime(),
+    resolvedAt: z.string().datetime().nullable(),
+  }),
+});
+
+export type AlertStatusEvent = z.infer<typeof alertStatusEventSchema>;

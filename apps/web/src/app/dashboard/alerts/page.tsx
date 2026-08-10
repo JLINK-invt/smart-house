@@ -1,5 +1,46 @@
-import { FeaturePage } from "@/components/feature-page";
+import { cookies } from "next/headers";
+import { AlertsClient } from "./alerts-client";
+import { accessTokenCookie } from "@/lib/auth";
+import { getAlerts, getNotificationInbox, getOrganizations } from "@/lib/api";
+import { getApiUrl } from "@/lib/config";
+import { redirectExpiredSession } from "@/lib/session";
 
-export default function AlertsPage() {
-  return <FeaturePage eyebrow="Atención" title="Centro de alertas" description="Las alertas de umbral y desconexión se concentrarán en una vista accionable y auditable." cards={[{ title: "Abiertas", value: "0", detail: "No hay condiciones activas." }, { title: "Reglas", value: "0", detail: "Se habilitarán con telemetría real." }, { title: "Canales", value: "Panel", detail: "Correo se añadirá al módulo de notificaciones." }]} />;
+async function loadAlerts(accessToken: string) {
+  try {
+    const organizations = await getOrganizations(accessToken);
+    return await Promise.all(
+      organizations.map(async (organization) => {
+        const [alerts, inbox] = await Promise.all([
+          getAlerts(accessToken, organization.id),
+          getNotificationInbox(accessToken, organization.id),
+        ]);
+        return { organization, alerts, inbox };
+      }),
+    );
+  } catch (error) {
+    redirectExpiredSession(error);
+  }
+}
+
+export default async function AlertsPage() {
+  const accessToken = (await cookies()).get(accessTokenCookie)?.value ?? "";
+  const initial = await loadAlerts(accessToken);
+
+  return (
+    <section className="feature-page organization-page">
+      <header className="feature-hero">
+        <p className="aero-kicker">Atención</p>
+        <h1>Centro de alertas</h1>
+        <p>
+          Consulta, reconoce, resuelve o silencia incidentes. Cada cambio queda
+          auditado y se actualiza en tiempo real.
+        </p>
+      </header>
+      <AlertsClient
+        apiOrigin={getApiUrl()}
+        accessToken={accessToken}
+        initial={initial}
+      />
+    </section>
+  );
 }
