@@ -21,4 +21,18 @@ describe('readWorkerConfig', () => {
       TELEMETRY_OUTBOX_BATCH_SIZE: 25,
     });
   });
+
+  it('uses local Mailpit SMTP and accepts a configurable relay', () => {
+    expect(readWorkerConfig({})).toMatchObject({
+      SMTP_HOST: 'localhost',
+      SMTP_PORT: 1025,
+      SMTP_FROM: 'alerts@smart-house.local',
+    });
+    expect(
+      readWorkerConfig({ SMTP_HOST: 'mailpit', SMTP_PORT: '2525' }),
+    ).toMatchObject({
+      SMTP_HOST: 'mailpit',
+      SMTP_PORT: 2525,
+    });
+  });
 });

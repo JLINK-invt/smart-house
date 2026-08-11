@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
   const cookie = {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: request.nextUrl.protocol === "https:",
+    secure: process.env.NODE_ENV === "production",
     maxAge: payload.expires_in ?? 300,
     path: "/",
   };

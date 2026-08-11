@@ -104,6 +104,31 @@ export type DeviceCommands = {
   supportedCommands: string[];
   items: DeviceCommand[];
 };
+export type Alert = {
+  id: string;
+  ruleId: string;
+  deviceId: string;
+  metric: string;
+  observedValue: number;
+  observedAt: string;
+  message: string;
+  severity: "low" | "medium" | "high" | "critical";
+  state: "open" | "acknowledged" | "resolved" | "silenced";
+  openedAt: string;
+  resolvedAt: string | null;
+};
+export type AlertFilters = Pick<Partial<Alert>, "state" | "severity">;
+export type InboxNotification = {
+  id: string;
+  alertId: string;
+  title: string;
+  body: string;
+  severity: Alert["severity"];
+  data: Record<string, unknown>;
+  readAt: string | null;
+  createdAt: string;
+};
+export type NotificationInbox = { items: InboxNotification[]; unreadCount: number };
 
 export class UnauthorizedApiError extends Error {
   constructor() {
@@ -134,6 +159,31 @@ export async function getOrganizations(
   const response = await authorizedFetch("/api/organizations", accessToken);
   throwIfUnauthorized(response);
   return response.ok ? ((await response.json()) as Organization[]) : [];
+}
+
+export async function getNotificationInbox(
+  accessToken: string,
+  organizationId: string,
+): Promise<NotificationInbox> {
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/notifications`, accessToken,
+  );
+  throwIfUnauthorized(response);
+  return response.ok ? (await response.json()) as NotificationInbox : { items: [], unreadCount: 0 };
+}
+
+export async function markNotificationRead(
+  accessToken: string,
+  organizationId: string,
+  notificationId: string,
+): Promise<InboxNotification> {
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/notifications/${notificationId}/read`,
+    accessToken, { method: "POST" },
+  );
+  throwIfUnauthorized(response);
+  if (!response.ok) throw new Error("Unable to mark notification read.");
+  return (await response.json()) as InboxNotification;
 }
 
 export async function getOrganizationMembers(
@@ -257,6 +307,39 @@ export async function getDeviceCommands(
     );
   }
   return (await response.json()) as DeviceCommands;
+}
+
+export async function getAlerts(
+  accessToken: string,
+  organizationId: string,
+  filters: AlertFilters = {},
+): Promise<Alert[]> {
+  const params = new URLSearchParams();
+  if (filters.state) params.set("state", filters.state);
+  if (filters.severity) params.set("severity", filters.severity);
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/alerts${params.size ? `?${params}` : ""}`,
+    accessToken,
+  );
+  throwIfUnauthorized(response);
+  if (!response.ok) throw new Error(`Alerts request failed (${response.status}).`);
+  return (await response.json()) as Alert[];
+}
+
+export async function transitionAlert(
+  accessToken: string,
+  organizationId: string,
+  alertId: string,
+  action: "acknowledge" | "resolve" | "silence",
+): Promise<Alert> {
+  const response = await authorizedFetch(
+    `/api/organizations/${organizationId}/alerts/${alertId}/${action}`,
+    accessToken,
+    { method: "POST" },
+  );
+  throwIfUnauthorized(response);
+  if (!response.ok) throw new Error(`Alert action failed (${response.status}).`);
+  return (await response.json()) as Alert;
 }
 
 async function mutateDevice(

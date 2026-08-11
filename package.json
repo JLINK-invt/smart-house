@@ -15,6 +15,7 @@
     "validate": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e && pnpm build",
     "test:ui": "playwright test",
     "test:spike": "SPIKE_E2E=true playwright test tests/e2e/spike.spec.ts",
+    "check:contracts": "node scripts/check-contracts.mjs",
     "simulator": "pnpm --dir simulador start",
     "mqtt:certs": "bash infra/local/generate-mqtt-certs.sh",
     "simulator:broker:up": "docker compose -f infra/local/docker-compose.yml up -d --wait mqtt",

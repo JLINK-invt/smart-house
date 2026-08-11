@@ -38,6 +38,10 @@ export class OrganizationsService implements OnModuleDestroy {
     return (await this.list(identity)).map((organization) => organization.id);
   }
 
+  async userId(identity: Identity): Promise<string> {
+    return this.upsertUser(identity);
+  }
+
   async create(identity: Identity, name: string) {
     const userId = await this.upsertUser(identity);
     const organization = await this.database.query<{

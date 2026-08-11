@@ -15,6 +15,11 @@ const telemetryPayload = {
   metrics: { temperature: { value: 68, unit: 'fahrenheit' as const } },
 };
 
+const currentTelemetryPayload = () => ({
+  ...telemetryPayload,
+  occurredAt: new Date().toISOString(),
+});
+
 const commandAckPayload = {
   schemaVersion: '1.0' as const,
   messageId: 'ack-1',
@@ -31,6 +36,7 @@ const normalize = (): NormalizedTelemetry =>
     receivedAt: new Date('2026-01-01T00:01:00.000Z'),
     maxFutureSkewMs: 5 * 60_000,
     lateAfterMs: 24 * 60 * 60_000,
+    maxPastAgeMs: 7 * 24 * 60 * 60_000,
   });
 
 type TransactionOptions = {
@@ -72,6 +78,10 @@ function setupTransaction(options: TransactionOptions = {}) {
     if (statement.includes('INSERT INTO telemetry_records')) {
       if (options.insertError) throw options.insertError;
       return { rowCount: options.rowCount ?? 1, rows: [] };
+    }
+    if (statement.includes('FROM alert_rules')) return { rows: [] };
+    if (statement.includes('INSERT INTO alerts')) {
+      return { rowCount: 1, rows: [] };
     }
     if (statement.includes('INSERT INTO outbox_events')) {
       return { rowCount: 1, rows: [] };
@@ -217,7 +227,7 @@ describe('WorkerService', () => {
       }
     ).consume(
       'tenants/demo/devices/sensor-1/telemetry',
-      Buffer.from(JSON.stringify(telemetryPayload)),
+      Buffer.from(JSON.stringify(currentTelemetryPayload())),
     );
 
     expect(persistTelemetry).toHaveBeenCalledTimes(1);
@@ -244,6 +254,38 @@ describe('WorkerService', () => {
       expect.stringContaining('Rejected telemetry'),
     );
   });
+
+  it.each([
+    ['malformed JSON', Buffer.from('{not-json')],
+    ['an oversized payload', Buffer.alloc(8 * 1024 + 1, 'a')],
+  ])(
+    'rejects %s without interrupting subsequent telemetry',
+    async (_name, payload) => {
+      const service = new WorkerService();
+      const persistTelemetry = jest.fn().mockResolvedValue(undefined);
+      const warn = jest.fn();
+      (service as unknown as { persist: jest.Mock }).persist = persistTelemetry;
+      (service as unknown as { logger: { warn: jest.Mock } }).logger = {
+        warn,
+      };
+
+      const consume = (
+        service as unknown as {
+          consume: (topic: string, body: Buffer) => Promise<void>;
+        }
+      ).consume.bind(service);
+      await consume('tenants/demo/devices/sensor-1/telemetry', payload);
+      await consume(
+        'tenants/demo/devices/sensor-1/telemetry',
+        Buffer.from(JSON.stringify(currentTelemetryPayload())),
+      );
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Rejected telemetry'),
+      );
+      expect(persistTelemetry).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     ['tenants/other/devices/sensor-1/telemetry', telemetryPayload],
@@ -273,7 +315,8 @@ describe('WorkerService', () => {
 
   it('records a matching command acknowledgement from pending or sent idempotently', async () => {
     const release = jest.fn();
-    const query = jest.fn((statement: string) => {
+    const query = jest.fn((statement: string, _parameters?: unknown[]) => {
+      void _parameters;
       if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
       if (statement.includes('FROM commands c')) {
         return {
@@ -587,6 +630,197 @@ describe('WorkerService', () => {
     );
   });
 
+  it('evaluates newly persisted readings in the telemetry transaction', async () => {
+    const { query, service } = setupTransaction();
+
+    await persist(service);
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM alert_rules'),
+      ['organization-1', 'device-1', 'temperature'],
+    );
+    const alertCall = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('FROM alert_rules'),
+    );
+    const commitCall = query.mock.calls.findIndex(([sql]) => sql === 'COMMIT');
+    expect(alertCall).toBeGreaterThan(-1);
+    expect(commitCall).toBeGreaterThan(alertCall);
+    expect(query.mock.calls[alertCall][0]).toContain('FOR UPDATE');
+  });
+
+  it('starts the duration clock before opening and opens after it has elapsed', async () => {
+    const rule: {
+      id: string;
+      name: string;
+      metric: string;
+      operator: 'gt';
+      threshold: number;
+      severity: 'high';
+      durationSeconds: number;
+      hysteresis: number;
+      cooldownSeconds: number;
+      conditionStartedAt: string | null;
+    } = {
+      id: 'rule-1',
+      name: 'High temperature',
+      metric: 'temperature',
+      operator: 'gt',
+      threshold: 30,
+      severity: 'high',
+      durationSeconds: 60,
+      hysteresis: 0,
+      cooldownSeconds: 0,
+      conditionStartedAt: null,
+    };
+    const query = jest.fn((statement: string) => {
+      if (statement.includes('FROM alert_rules')) return { rows: [rule] };
+      if (statement.includes('SELECT id FROM alerts')) return { rows: [] };
+      return { rows: [], rowCount: 1 };
+    });
+    const service = new WorkerService();
+    const evaluate = (observedAt: string) =>
+      (
+        service as unknown as {
+          evaluateThresholdAlerts: (
+            client: { query: jest.Mock },
+            organizationId: string,
+            deviceId: string,
+            metric: string,
+            value: number,
+            time: string,
+          ) => Promise<void>;
+        }
+      ).evaluateThresholdAlerts(
+        { query },
+        'organization-1',
+        'device-1',
+        'temperature',
+        31,
+        observedAt,
+      );
+
+    await evaluate('2026-01-01T00:00:00.000Z');
+    expect(
+      query.mock.calls.some(([sql]) => sql.includes('INSERT INTO alerts')),
+    ).toBe(false);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('condition_started_at = $3'),
+      ['rule-1', 'organization-1', '2026-01-01T00:00:00.000Z'],
+    );
+
+    query.mockClear();
+    rule.conditionStartedAt = '2026-01-01T00:00:00.000Z';
+    await evaluate('2026-01-01T00:01:00.000Z');
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO alerts'),
+      ['rule-1', 'organization-1', 'device-1', 31, '2026-01-01T00:01:00.000Z'],
+    );
+  });
+
+  it('uses hysteresis to retain an open incident until the recovery threshold is crossed', async () => {
+    const rule = {
+      id: 'rule-1',
+      name: 'High temperature',
+      metric: 'temperature',
+      operator: 'gt',
+      threshold: 30,
+      severity: 'high',
+      durationSeconds: 0,
+      hysteresis: 2,
+      cooldownSeconds: 0,
+      conditionStartedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const query = jest.fn((statement: string) => {
+      if (statement.includes('FROM alert_rules')) return { rows: [rule] };
+      if (statement.includes('SELECT id FROM alerts'))
+        return { rows: [{ id: 'alert-1' }] };
+      return { rows: [], rowCount: 1 };
+    });
+    const service = new WorkerService();
+    const evaluate = (value: number) =>
+      (
+        service as unknown as {
+          evaluateThresholdAlerts: (
+            client: { query: jest.Mock },
+            organizationId: string,
+            deviceId: string,
+            metric: string,
+            value: number,
+            time: string,
+          ) => Promise<void>;
+        }
+      ).evaluateThresholdAlerts(
+        { query },
+        'organization-1',
+        'device-1',
+        'temperature',
+        value,
+        '2026-01-01T00:01:00.000Z',
+      );
+
+    await evaluate(29);
+    expect(
+      query.mock.calls.some(([sql]) => sql.includes("SET state = 'resolved'")),
+    ).toBe(false);
+    query.mockClear();
+    await evaluate(28);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("SET state = 'resolved'"),
+      ['organization-1', 'rule-1', 'device-1', '2026-01-01T00:01:00.000Z'],
+    );
+  });
+
+  it('applies cooldown when opening a new incident for a resolved rule', async () => {
+    const query = jest.fn((statement: string) => {
+      if (statement.includes('FROM alert_rules')) {
+        return {
+          rows: [
+            {
+              id: 'rule-1',
+              name: 'High temperature',
+              metric: 'temperature',
+              operator: 'gt',
+              threshold: 30,
+              severity: 'high',
+              durationSeconds: 0,
+              hysteresis: 0,
+              cooldownSeconds: 300,
+              conditionStartedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        };
+      }
+      if (statement.includes('SELECT id FROM alerts')) return { rows: [] };
+      return { rows: [], rowCount: 1 };
+    });
+    const service = new WorkerService();
+    await (
+      service as unknown as {
+        evaluateThresholdAlerts: (
+          client: { query: jest.Mock },
+          organizationId: string,
+          deviceId: string,
+          metric: string,
+          value: number,
+          time: string,
+        ) => Promise<void>;
+      }
+    ).evaluateThresholdAlerts(
+      { query },
+      'organization-1',
+      'device-1',
+      'temperature',
+      31,
+      '2026-01-01T00:01:00.000Z',
+    );
+
+    const insert = query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT INTO alerts'),
+    );
+    expect(insert?.[0]).toContain("a.state = 'resolved'");
+    expect(insert?.[0]).toContain("r.cooldown_seconds * interval '1 second'");
+  });
+
   it('commits duplicate telemetry without presence, outbox, or Redis side effects', async () => {
     const { publish, query, release, service } = setupTransaction({
       rowCount: 0,
@@ -671,7 +905,15 @@ describe('WorkerService', () => {
 
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('ORDER BY created_at, id'),
-      [['telemetry.persisted', 'command.status'], 100],
+      [
+        [
+          'telemetry.persisted',
+          'command.status',
+          'alert.status',
+          'notification.inbox',
+        ],
+        100,
+      ],
     );
     expect(updates).toEqual(['event-1', 'event-2']);
     expect(
@@ -861,13 +1103,32 @@ describe('WorkerService', () => {
     ).toBe(false);
   });
 
-  it('reconciles stale online devices to offline through the pool', async () => {
+  it('opens offline alerts once for a real online-to-offline transition', async () => {
     const service = new WorkerService();
-    const query = jest.fn().mockResolvedValue({ rowCount: 1, rows: [] });
-    (service as unknown as { database: { query: jest.Mock } }).database = {
-      query,
+    let transitions = 0;
+    const query = jest.fn((statement: string) => {
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes("SET status = 'offline'")) {
+        transitions += 1;
+        return transitions === 1
+          ? {
+              rowCount: 1,
+              rows: [{ organizationId: 'organization-1', id: 'device-1' }],
+            }
+          : { rowCount: 0, rows: [] };
+      }
+      if (statement.includes('INSERT INTO alerts'))
+        return { rowCount: 1, rows: [] };
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const connect = jest.fn().mockResolvedValue({ query, release: jest.fn() });
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect,
     };
 
+    await (
+      service as unknown as { reconcileDeviceStatuses: () => Promise<void> }
+    ).reconcileDeviceStatuses();
     await (
       service as unknown as { reconcileDeviceStatuses: () => Promise<void> }
     ).reconcileDeviceStatuses();
@@ -876,6 +1137,77 @@ describe('WorkerService', () => {
       expect.stringContaining("SET status = 'offline'"),
       [90],
     );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "ON CONFLICT (rule_id, device_id) WHERE state = 'open'",
+      ),
+      ['organization-1', 'device-1'],
+    );
+    expect(
+      query.mock.calls.filter(([statement]) =>
+        statement.includes('INSERT INTO alerts'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('resolves open offline alerts when a device reconnects', async () => {
+    const query = jest.fn((statement: string) => {
+      if (statement.includes('WITH previous AS')) {
+        return { rows: [{ previousStatus: 'offline', status: 'online' }] };
+      }
+      if (statement.includes("SET state = 'resolved'")) return { rows: [] };
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+
+    await (
+      service as unknown as {
+        updateDevicePresence: (
+          client: { query: jest.Mock },
+          organizationId: string,
+          deviceId: string,
+          occurredAt: string,
+        ) => Promise<void>;
+      }
+    ).updateDevicePresence(
+      { query },
+      'organization-1',
+      'device-1',
+      '2026-01-01T00:02:00.000Z',
+    );
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("r.rule_type = 'device_offline'"),
+      ['organization-1', 'device-1', '2026-01-01T00:02:00.000Z'],
+    );
+  });
+
+  it('uses cooldown and open-alert uniqueness to suppress flapping storms', async () => {
+    const query = jest.fn((statement: string, _parameters?: unknown[]) => {
+      void _parameters;
+      if (statement.includes('INSERT INTO alerts')) return { rows: [] };
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+
+    await (
+      service as unknown as {
+        openDeviceOfflineAlerts: (
+          client: { query: jest.Mock },
+          organizationId: string,
+          deviceId: string,
+        ) => Promise<void>;
+      }
+    ).openDeviceOfflineAlerts({ query }, 'organization-1', 'device-1');
+
+    const [statement, parameters] = query.mock.calls[0];
+    expect(statement).toContain(
+      "a.resolved_at > now() - (r.cooldown_seconds * interval '1 second')",
+    );
+    expect(statement).toContain(
+      "ON CONFLICT (rule_id, device_id) WHERE state = 'open' DO NOTHING",
+    );
+    expect(parameters).toEqual(['organization-1', 'device-1']);
   });
 
   it('expires pending and sent commands and suppresses their unpublished outbox events', async () => {
@@ -952,26 +1284,32 @@ describe('WorkerService', () => {
       service as unknown as {
         updateDevicePresence: (
           databaseClient: typeof client,
+          organizationId: string,
           deviceId: string,
           occurredAt: string,
         ) => Promise<void>;
       }
-    ).updateDevicePresence(client, 'device-1', '2025-12-31T23:00:00.000Z');
+    ).updateDevicePresence(
+      client,
+      'organization-1',
+      'device-1',
+      '2025-12-31T23:00:00.000Z',
+    );
 
     expect(query).toHaveBeenCalledWith(
-      expect.stringContaining("WHEN status = 'disabled' THEN 'disabled'"),
+      expect.stringContaining("WHEN d.status = 'disabled' THEN 'disabled'"),
       expect.any(Array),
     );
     expect(query).toHaveBeenCalledWith(
-      expect.stringContaining('GREATEST(COALESCE(last_seen_at'),
+      expect.stringContaining('GREATEST(COALESCE(d.last_seen_at'),
       expect.any(Array),
     );
     expect(query).toHaveBeenCalledWith(
-      expect.stringContaining('$2::timestamptz >= COALESCE(last_seen_at'),
+      expect.stringContaining('$3::timestamptz >= COALESCE(d.last_seen_at'),
       expect.any(Array),
     );
     expect(query).toHaveBeenCalledWith(
-      expect.stringContaining("now() - ($3 * interval '1 second')"),
+      expect.stringContaining("now() - ($4 * interval '1 second')"),
       expect.any(Array),
     );
   });

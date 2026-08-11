@@ -11,6 +11,7 @@ const options: TelemetryNormalizationOptions = {
   receivedAt: new Date('2026-08-06T12:01:00.000Z'),
   maxFutureSkewMs: 5 * 60_000,
   lateAfterMs: 24 * 60 * 60_000,
+  maxPastAgeMs: 7 * 24 * 60 * 60_000,
 };
 
 describe('normalizeTelemetry', () => {
@@ -90,5 +91,21 @@ describe('normalizeTelemetry', () => {
     const normalized = normalizeTelemetry(telemetry, options);
     expect(normalized.occurredAt).toBe('2026-08-05T12:00:59.999Z');
     expect(normalized.timeQuality).toBe('late');
+  });
+
+  it('rejects occurredAt values outside the replay window', () => {
+    const telemetry = temperatureTelemetrySchema.parse({
+      schemaVersion: '1.0',
+      messageId: 'message-5',
+      tenantId: 'demo',
+      deviceId: 'sensor-1',
+      deviceType: 'temperature_sensor',
+      occurredAt: '2026-07-30T12:00:59.999Z',
+      metrics: { temperature: { value: 24, unit: 'celsius' } },
+    });
+
+    expect(() => normalizeTelemetry(telemetry, options)).toThrow(
+      'allowed past age',
+    );
   });
 });

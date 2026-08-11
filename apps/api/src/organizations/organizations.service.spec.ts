@@ -1,4 +1,5 @@
 import { OrganizationsService } from './organizations.service';
+import { ForbiddenException } from '@nestjs/common';
 
 const query = jest.fn();
 const release = jest.fn();
@@ -82,6 +83,20 @@ describe('OrganizationsService', () => {
     expect(query).not.toHaveBeenCalledWith(
       'INSERT INTO organizations (name) VALUES ($1) RETURNING id',
       ['Personal organization'],
+    );
+  });
+
+  it('denies member listing when the identity has no active tenant membership', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(
+      service.members(identity, 'organization-other'),
+    ).rejects.toThrow(ForbiddenException);
+    expect(query).not.toHaveBeenCalledWith(
+      expect.stringContaining('JOIN users u ON u.id = m.user_id'),
+      ['organization-other'],
     );
   });
 });
