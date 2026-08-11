@@ -15,6 +15,11 @@ const telemetryPayload = {
   metrics: { temperature: { value: 68, unit: 'fahrenheit' as const } },
 };
 
+const currentTelemetryPayload = () => ({
+  ...telemetryPayload,
+  occurredAt: new Date().toISOString(),
+});
+
 const commandAckPayload = {
   schemaVersion: '1.0' as const,
   messageId: 'ack-1',
@@ -31,6 +36,7 @@ const normalize = (): NormalizedTelemetry =>
     receivedAt: new Date('2026-01-01T00:01:00.000Z'),
     maxFutureSkewMs: 5 * 60_000,
     lateAfterMs: 24 * 60 * 60_000,
+    maxPastAgeMs: 7 * 24 * 60 * 60_000,
   });
 
 type TransactionOptions = {
@@ -221,7 +227,7 @@ describe('WorkerService', () => {
       }
     ).consume(
       'tenants/demo/devices/sensor-1/telemetry',
-      Buffer.from(JSON.stringify(telemetryPayload)),
+      Buffer.from(JSON.stringify(currentTelemetryPayload())),
     );
 
     expect(persistTelemetry).toHaveBeenCalledTimes(1);
@@ -248,6 +254,38 @@ describe('WorkerService', () => {
       expect.stringContaining('Rejected telemetry'),
     );
   });
+
+  it.each([
+    ['malformed JSON', Buffer.from('{not-json')],
+    ['an oversized payload', Buffer.alloc(8 * 1024 + 1, 'a')],
+  ])(
+    'rejects %s without interrupting subsequent telemetry',
+    async (_name, payload) => {
+      const service = new WorkerService();
+      const persistTelemetry = jest.fn().mockResolvedValue(undefined);
+      const warn = jest.fn();
+      (service as unknown as { persist: jest.Mock }).persist = persistTelemetry;
+      (service as unknown as { logger: { warn: jest.Mock } }).logger = {
+        warn,
+      };
+
+      const consume = (
+        service as unknown as {
+          consume: (topic: string, body: Buffer) => Promise<void>;
+        }
+      ).consume.bind(service);
+      await consume('tenants/demo/devices/sensor-1/telemetry', payload);
+      await consume(
+        'tenants/demo/devices/sensor-1/telemetry',
+        Buffer.from(JSON.stringify(currentTelemetryPayload())),
+      );
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Rejected telemetry'),
+      );
+      expect(persistTelemetry).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     ['tenants/other/devices/sensor-1/telemetry', telemetryPayload],

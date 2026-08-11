@@ -28,6 +28,7 @@ export type TelemetryNormalizationOptions = {
   receivedAt: Date;
   maxFutureSkewMs: number;
   lateAfterMs: number;
+  maxPastAgeMs: number;
 };
 
 export function normalizeTelemetry(
@@ -38,6 +39,9 @@ export function normalizeTelemetry(
   const receivedAtMs = options.receivedAt.getTime();
   if (occurredAtMs - receivedAtMs > options.maxFutureSkewMs) {
     throw new Error('Telemetry occurredAt exceeds the allowed future skew.');
+  }
+  if (receivedAtMs - occurredAtMs > options.maxPastAgeMs) {
+    throw new Error('Telemetry occurredAt exceeds the allowed past age.');
   }
 
   const timeQuality: TimeQuality =

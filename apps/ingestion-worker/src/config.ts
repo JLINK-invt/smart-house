@@ -89,6 +89,11 @@ const schema = z.object({
     .int()
     .positive()
     .default(86_400),
+  TELEMETRY_MAX_PAST_AGE_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(604_800),
 });
 
 export type WorkerConfig = z.infer<typeof schema>;

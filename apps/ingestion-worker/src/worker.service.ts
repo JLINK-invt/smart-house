@@ -176,6 +176,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
           maxFutureSkewMs:
             this.config.TELEMETRY_MAX_FUTURE_SKEW_SECONDS * 1_000,
           lateAfterMs: this.config.TELEMETRY_LATE_AFTER_SECONDS * 1_000,
+          maxPastAgeMs: this.config.TELEMETRY_MAX_PAST_AGE_SECONDS * 1_000,
         }),
       );
     } catch (error) {
