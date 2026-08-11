@@ -32,6 +32,13 @@ describe('AppController (e2e)', () => {
 
     expect(response.statusCode).toBe(200);
     expect(healthResponseSchema.safeParse(response.json()).success).toBe(true);
+    expect(response.headers).toMatchObject({
+      'cache-control': 'no-store',
+      'content-security-policy':
+        "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+      'x-content-type-options': 'nosniff',
+      'x-frame-options': 'DENY',
+    });
   });
 
   it('/api/docs-json (GET)', async () => {
@@ -41,6 +48,22 @@ describe('AppController (e2e)', () => {
     expect(response.json()).toMatchObject({
       info: { title: 'Smart House API' },
     });
+    expect(response.headers['content-security-policy']).toContain(
+      "default-src 'self'",
+    );
+  });
+
+  it('does not grant CORS access to an untrusted origin', async () => {
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/api/health',
+      headers: {
+        origin: 'https://untrusted.example',
+        'access-control-request-method': 'GET',
+      },
+    });
+
+    expect(response.headers['access-control-allow-origin']).toBeUndefined();
   });
 
   afterEach(async () => {

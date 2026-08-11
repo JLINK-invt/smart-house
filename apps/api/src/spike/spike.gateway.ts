@@ -25,6 +25,7 @@ const persistedTelemetryEventSchema = z.object({
 const commandStatusTopic = 'command.status';
 const alertStatusTopic = 'alert.status';
 const notificationInboxTopic = 'notification.inbox';
+const environment = readEnvironment(process.env);
 const notificationInboxEventSchema = z.object({
   eventId: z.string().uuid(),
   organizationId: z.string().uuid(),
@@ -52,7 +53,7 @@ const userRoom = (userId: string) => `user:${userId}`;
 
 @WebSocketGateway({
   namespace: '/spike',
-  cors: { origin: true },
+  cors: { origin: environment.WEB_ORIGIN, credentials: false },
   pingInterval: 25_000,
   pingTimeout: 20_000,
 })
@@ -61,7 +62,7 @@ export class SpikeGateway implements OnModuleInit, OnModuleDestroy {
   server!: Server;
 
   private readonly logger = new Logger(SpikeGateway.name);
-  private readonly redis = new Redis(readEnvironment(process.env).REDIS_URL);
+  private readonly redis = new Redis(environment.REDIS_URL);
   private readonly socketOrganizations = new Map<string, Set<string>>();
 
   constructor(

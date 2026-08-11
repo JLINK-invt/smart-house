@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createPkcePair, createState, oidcStateCookie, pkceVerifierCookie } from "@/lib/auth";
 import { getKeycloakConfig } from "@/lib/config";
 
-export function GET(request: Request) {
+export function GET() {
   const { issuer, clientId, redirectUri } = getKeycloakConfig();
   const { verifier, challenge } = createPkcePair();
   const state = createState();
@@ -21,7 +21,7 @@ export function GET(request: Request) {
   const cookie = {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: new URL(request.url).protocol === "https:",
+    secure: process.env.NODE_ENV === "production",
     maxAge: 600,
     path: "/",
   };

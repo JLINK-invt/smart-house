@@ -120,6 +120,9 @@ describe('SpikeGateway', () => {
       'organization:organization-1:device:device-1',
     ]);
     expect(emit).toHaveBeenCalledWith('telemetry.persisted', event);
+    expect(to).not.toHaveBeenCalledWith(
+      expect.arrayContaining(['organization:organization-2']),
+    );
   });
 
   it('validates and emits command status events to authorized rooms', () => {
@@ -153,6 +156,11 @@ describe('SpikeGateway', () => {
       'organization:33333333-3333-4333-8333-333333333333:device:44444444-4444-4444-8444-444444444444',
     ]);
     expect(emit).toHaveBeenCalledWith('command.status', event);
+    expect(to).not.toHaveBeenCalledWith(
+      expect.arrayContaining([
+        'organization:55555555-5555-4555-8555-555555555555',
+      ]),
+    );
   });
 
   it('validates and emits alert status events to authorized rooms', () => {
@@ -191,5 +199,10 @@ describe('SpikeGateway', () => {
       'organization:33333333-3333-4333-8333-333333333333:device:44444444-4444-4444-8444-444444444444',
     ]);
     expect(emit).toHaveBeenCalledWith('alert.status', event);
+    expect(to).not.toHaveBeenCalledWith(
+      expect.arrayContaining([
+        'organization:55555555-5555-4555-8555-555555555555',
+      ]),
+    );
   });
 });
