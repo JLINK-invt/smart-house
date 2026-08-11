@@ -13,6 +13,8 @@
 | Web | `API_URL` | No | `http://localhost:4000` | Plataforma |
 | API | `NODE_ENV` | No | `development` | Plataforma |
 | API | `PORT` | No | `4000` | Plataforma |
+| API/Worker | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | No | `http://localhost:4318/v1/traces` | Plataforma |
+| API/Worker | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | No | `http://localhost:4318/v1/metrics` | Plataforma |
 | Worker | `DEVICE_ONLINE_GRACE_PERIOD_SECONDS` | No | `90` | Plataforma |
 | Worker | `DEVICE_STATUS_RECONCILIATION_INTERVAL_MS` | No | `30000` | Plataforma |
 | Worker | `TELEMETRY_MAX_FUTURE_SKEW_SECONDS` | No | `300` | Plataforma |

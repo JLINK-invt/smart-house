@@ -1313,4 +1313,29 @@ describe('WorkerService', () => {
       expect.any(Array),
     );
   });
+
+  it('measures pending outbox, command, and notification work independently', async () => {
+    const query = jest.fn().mockResolvedValue({
+      rows: [{ outbox: '3', commands: '2', notifications: '1' }],
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { query: jest.Mock } }).database = {
+      query,
+    };
+
+    await (
+      service as unknown as {
+        measureOperationalState: () => Promise<void>;
+      }
+    ).measureOperationalState();
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("status IN ('pending', 'processing')"),
+      ['mqtt.command.publish'],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('topic <> $1 AND processed_at IS NULL'),
+      ['mqtt.command.publish'],
+    );
+  });
 });

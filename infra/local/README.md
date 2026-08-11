@@ -9,7 +9,9 @@ Los servicios de este directorio son exclusivos para desarrollo local. Mosquitto
 | PostgreSQL 17           | 5432   | `smart_house` / `smart_house`             |
 | Redis 7                 | 6379   | Sin contraseña, solo local                |
 | Mosquitto 2             | 8883   | mTLS con CA local y ACL por tópico        |
-| OpenTelemetry Collector | 4318   | Receptor OTLP HTTP y salida `debug` local |
+| OpenTelemetry Collector | 4318, 8889 | Receptor OTLP HTTP y métricas Prometheus |
+| Prometheus              | 9090   | Consulta de métricas locales               |
+| Grafana                 | 3001   | `admin` / `admin`                          |
 
 ## Uso
 
@@ -25,6 +27,23 @@ pnpm infra:down
 TimescaleDB, los resultados y planes de consultas históricas y el objetivo local
 de latencia de 500 ms. Usa IDs aislados y elimina los datos y agregados de prueba
 al terminar; vuelve a ejecutar el comando para limpiar una ejecución interrumpida.
+
+## Observabilidad operativa
+
+Las aplicaciones exportan trazas y métricas OTLP HTTP cuando se definen
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` y `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`.
+Para el stack local ambos apuntan a `http://localhost:4318/v1/traces` y
+`http://localhost:4318/v1/metrics`, respectivamente. Prometheus recoge las
+métricas del collector en `http://localhost:9090`; Grafana provisiona el panel
+**Smart House Operations** en `http://localhost:3001`.
+
+El panel muestra resultados y latencia p95 de telemetría, trabajo pendiente de
+outboxes/notificaciones y segundos restantes de los certificados MQTT del
+worker y la CA. También están disponibles `smart_house_worker_errors_total` y
+`smart_house_notifications_total` para investigar fallos y entregas. En un
+entorno compartido, alerta si el backlog crece sostenidamente, hay errores en
+cinco minutos, la latencia p95 supera el SLO de tres segundos o un certificado
+queda por debajo del periodo de renovación acordado.
 
 ## MQTT mTLS y ACL
 
