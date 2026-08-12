@@ -30,12 +30,16 @@ al terminar; vuelve a ejecutar el comando para limpiar una ejecución interrumpi
 
 ## Observabilidad operativa
 
-Las aplicaciones exportan trazas y métricas OTLP HTTP cuando se definen
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` y `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`.
-Para el stack local ambos apuntan a `http://localhost:4318/v1/traces` y
-`http://localhost:4318/v1/metrics`, respectivamente. Prometheus recoge las
+`pnpm dev` configura por defecto `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` y
+`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` para el stack local. Ambos apuntan a
+`http://localhost:4318/v1/traces` y `http://localhost:4318/v1/metrics`,
+respectivamente. Prometheus recoge las
 métricas del collector en `http://localhost:9090`; Grafana provisiona el panel
 **Smart House Operations** en `http://localhost:3001`.
+
+Si el worker registra `createOperationalMetrics is not a function`, detén y
+reinicia `pnpm dev`; el comando reconstruye observabilidad antes de iniciar el
+worker.
 
 El panel muestra resultados y latencia p95 de telemetría, trabajo pendiente de
 outboxes/notificaciones y segundos restantes de los certificados MQTT del

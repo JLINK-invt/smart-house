@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "pnpm --filter @smart-house/contracts build && turbo run dev --parallel",
+    "dev": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4318/v1/traces} OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-http://localhost:4318/v1/metrics} pnpm --filter @smart-house/contracts build && pnpm --filter @smart-house/observability build && turbo run dev --parallel",
     "build": "turbo run build",
     "lint": "turbo run lint",
     "test": "turbo run test",
@@ -25,6 +25,8 @@
     "infra:down": "docker compose -f infra/local/docker-compose.yml down",
     "db:migrate": "docker compose -f infra/local/docker-compose.yml exec -T postgres sh /migrate.sh",
     "db:verify:telemetry": "docker compose -f infra/local/docker-compose.yml exec -T postgres psql -X -U smart_house -d smart_house < packages/database/verify/telemetry_aggregates.sql",
+    "ops:backup": "bash infra/local/db-backup.sh",
+    "ops:restore": "bash infra/local/db-restore.sh",
     "typecheck": "turbo run typecheck",
     "format": "pnpm --recursive --if-present format"
   },
