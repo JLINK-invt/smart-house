@@ -6,8 +6,13 @@
       "outputs": ["dist/**", ".next/**"]
     },
     "dev": {
+      "dependsOn": ["^build"],
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "env": [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+      ]
     },
     "lint": {
       "dependsOn": ["^build"],

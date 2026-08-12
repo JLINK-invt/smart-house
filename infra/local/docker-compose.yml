@@ -1,13 +1,14 @@
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.29.0-pg17@sha256:450a61b5b6f957696a3631dec556d27760aaba824bed12b5c29677136feed95c
     command: postgres -c shared_preload_libraries=timescaledb
     environment:
       POSTGRES_DB: smart_house
       POSTGRES_USER: smart_house
-      POSTGRES_PASSWORD: smart_house
+      # Development-only default. Set POSTGRES_PASSWORD outside local development.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smart_house}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ../../packages/database/migrations:/migrations:ro
@@ -19,9 +20,9 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -31,7 +32,7 @@ services:
       retries: 10
 
   mqtt:
-    image: eclipse-mosquitto:2.0
+    image: eclipse-mosquitto:2.0.20@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb
     # Keep generated private keys mode 0600 on the host; Mosquitto reads them
     # as root because the bind mount is intentionally read-only.
     user: "0:0"
@@ -49,30 +50,57 @@ services:
       retries: 10
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.119.0
+    image: otel/opentelemetry-collector-contrib:0.119.0@sha256:36c35cc213c0f3b64d6e8a3e844dc90822f00725e0e518eaed5b08bcc2231e72
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     ports:
-      - "4318:4318"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:8889:8889"
     volumes:
       - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
 
+  prometheus:
+    image: prom/prometheus:v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:11.5.2@sha256:8b37a2f028f164ce7b9889e1765b9d6ee23fec80f871d156fbf436d6198d32b7
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      # Development-only default. Set GRAFANA_ADMIN_PASSWORD outside local development.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
   keycloak:
-    image: quay.io/keycloak/keycloak:26.1
+    image: quay.io/keycloak/keycloak:26.1@sha256:be6a86215213145bfb4fb3e2b3ab982a806d00262655abdcf3ffa6a38d241c7c
     command: start-dev --import-realm
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Development-only default. Set KEYCLOAK_ADMIN_PASSWORD outside local development.
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
       - keycloak-data:/opt/keycloak/data
 
   mailpit:
-    image: axllent/mailpit:v1.20.3
+    image: axllent/mailpit:v1.20.3@sha256:762dd66a062738309e43ad8efce733e8db4a73bf6a38e369aeb547aecb897d27
     ports:
-      - "1025:1025"
-      - "8025:8025"
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
 
 volumes:
   postgres-data:

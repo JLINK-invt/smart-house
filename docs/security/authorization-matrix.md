@@ -54,8 +54,11 @@ Las respuestas nunca devuelven secretos, tokens de activacion usados ni claves p
 | Suscribirse a realtime | Allow | Allow | Allow | Allow |
 | Exportar CSV | Allow + MFA | Allow + MFA | Allow | No |
 | Configurar retencion | Allow + MFA | No | No | No |
+| Solicitar eliminacion total de datos del tenant | Allow + MFA + confirmacion `DELETE` | No | No | No |
 
 Las consultas, suscripciones y exportaciones se limitan a los dispositivos de la organizacion. Exportar aplica rango maximo, rate limit, escape de formulas CSV y auditoria.
+
+La eliminacion total se ejecuta como un trabajo durable y reintentable. Solo el Owner puede solicitarla con confirmacion explicita; el solicitante puede consultar su trabajo con el mismo `organizationId`. El trabajo elimina datos operativos y membresias de ese tenant en una transaccion, conserva el registro de auditoria y marca la organizacion eliminada para impedir nueva ingesta o acceso por API.
 
 ## Comandos y alertas
 

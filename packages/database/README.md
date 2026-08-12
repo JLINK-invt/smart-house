@@ -46,3 +46,13 @@ transaction, so the script explicitly deletes the seed rows and refreshes the
 same windows again to remove benchmark materializations. It also removes stale
 benchmark IDs at startup, making reruns the documented cleanup process after an
 interrupted run, and confirms that no benchmark rows remain.
+
+`0018_tenant_data_deletion.sql` adds a durable full-tenant operational-data
+deletion job. An organization owner requests it through `POST
+/organizations/:organizationId/data-deletion` with `{ "confirmation": "DELETE" }`.
+The ingestion worker claims jobs with `FOR UPDATE SKIP LOCKED`, retries failures
+with bounded exponential backoff, and records completion or dead-letter status.
+All job reads and destructive statements are scoped by `organization_id`; audit
+events and the job record are retained, while membership is removed and the
+organization is marked deleted to prevent later MQTT or API access from
+recreating data.

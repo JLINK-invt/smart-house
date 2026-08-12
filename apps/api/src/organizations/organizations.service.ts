@@ -158,6 +158,7 @@ export class OrganizationsService implements OnModuleDestroy {
     const userId = await this.upsertUser(identity);
     const result = await this.database.query<Membership>(
       `SELECT m.organization_id AS "organizationId", m.role FROM memberships m
+       JOIN organizations o ON o.id = m.organization_id AND o.deleted_at IS NULL
        WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'active'`,
       [organizationId, userId],
     );

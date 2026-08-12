@@ -58,7 +58,7 @@ function setupTransaction(options: TransactionOptions = {}) {
       return { rows: [] };
     }
     if (statement.includes('pg_advisory_xact_lock')) return { rows: [] };
-    if (statement.includes('SELECT id FROM organizations')) {
+    if (statement.includes('FROM organizations WHERE mqtt_tenant_id')) {
       return { rows: [{ id: 'organization-1' }] };
     }
     if (statement.includes('INSERT INTO devices')) {
@@ -393,7 +393,8 @@ describe('WorkerService', () => {
 
   it('persists a device failure detail with a failed acknowledgement', async () => {
     const release = jest.fn();
-    const query = jest.fn((statement: string) => {
+    const query = jest.fn((statement: string, _parameters?: unknown[]) => {
+      void _parameters;
       if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
       if (statement.includes('FROM commands c')) {
         return {
@@ -1311,6 +1312,125 @@ describe('WorkerService', () => {
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining("now() - ($4 * interval '1 second')"),
       expect.any(Array),
+    );
+  });
+
+  it('measures pending outbox, command, and notification work independently', async () => {
+    const query = jest.fn().mockResolvedValue({
+      rows: [{ outbox: '3', commands: '2', notifications: '1' }],
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { query: jest.Mock } }).database = {
+      query,
+    };
+
+    await (
+      service as unknown as {
+        measureOperationalState: () => Promise<void>;
+      }
+    ).measureOperationalState();
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("status IN ('pending', 'processing')"),
+      ['mqtt.command.publish'],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('topic <> $1 AND processed_at IS NULL'),
+      ['mqtt.command.publish'],
+    );
+  });
+
+  it('deletes only the claimed tenant operational data and retains its audit trail', async () => {
+    const release = jest.fn();
+    const query = jest.fn((statement: string, _parameters?: unknown[]) => {
+      void _parameters;
+      if (statement === 'BEGIN' || statement === 'COMMIT') return { rows: [] };
+      if (statement.includes('WITH next AS')) {
+        return {
+          rows: [{ id: 'deletion-1', organizationId: 'organization-1' }],
+        };
+      }
+      if (statement.includes('DELETE FROM')) return { rows: [], rowCount: 1 };
+      if (statement.includes('UPDATE organizations'))
+        return { rows: [], rowCount: 1 };
+      if (statement.includes('UPDATE tenant_data_deletion_jobs'))
+        return { rows: [], rowCount: 1 };
+      if (statement.includes('organization.data_deletion.complete'))
+        return { rows: [] };
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const service = new WorkerService();
+    (service as unknown as { database: { connect: jest.Mock } }).database = {
+      connect: jest.fn().mockResolvedValue({ query, release }),
+    };
+
+    await (
+      service as unknown as { processDataDeletionJob: () => Promise<void> }
+    ).processDataDeletionJob();
+
+    const deletes = query.mock.calls.filter(([statement]) =>
+      statement.includes('DELETE FROM'),
+    );
+    expect(deletes).toHaveLength(13);
+    for (const call of deletes) {
+      expect(call[1]).toEqual(['organization-1']);
+    }
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE organizations SET deleted_at'),
+      ['organization-1'],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('organization.data_deletion.complete'),
+      ['deletion-1', 'organization-1'],
+    );
+    expect(query).toHaveBeenCalledWith('COMMIT');
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a failed deletion claim retryable after rolling back its data transaction', async () => {
+    const query = jest.fn((statement: string) => {
+      if (
+        statement === 'BEGIN' ||
+        statement === 'COMMIT' ||
+        statement === 'ROLLBACK'
+      )
+        return { rows: [] };
+      if (statement.includes('WITH next AS')) {
+        return {
+          rows: [{ id: 'deletion-1', organizationId: 'organization-1' }],
+        };
+      }
+      if (statement.includes('DELETE FROM notification_deliveries')) {
+        throw new Error('database unavailable');
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    const retry = jest.fn().mockResolvedValue({ rows: [] });
+    const service = new WorkerService();
+    (
+      service as unknown as {
+        database: { connect: jest.Mock; query: jest.Mock };
+      }
+    ).database = {
+      connect: jest.fn().mockResolvedValue({ query, release: jest.fn() }),
+      query: retry,
+    };
+
+    await expect(
+      (
+        service as unknown as {
+          processDataDeletionJob: () => Promise<void>;
+        }
+      ).processDataDeletionJob(),
+    ).rejects.toThrow('database unavailable');
+
+    expect(
+      query.mock.calls.filter(([statement]) => statement === 'COMMIT'),
+    ).toHaveLength(1);
+    expect(query).toHaveBeenCalledWith('ROLLBACK');
+    expect(retry).toHaveBeenCalledWith(
+      expect.stringContaining('status = CASE WHEN attempts >= max_attempts'),
+      ['deletion-1', 'database unavailable'],
     );
   });
 });

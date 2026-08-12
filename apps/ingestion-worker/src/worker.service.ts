@@ -4,6 +4,7 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
+import { createOperationalMetrics } from '@smart-house/observability';
 import {
   parseCommandAckPayload,
   parseTelemetryPayload,
@@ -13,6 +14,7 @@ import {
   type RelayCommand,
   type Telemetry,
 } from '@smart-house/contracts';
+import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import Redis from 'ioredis';
 import { connect, type MqttClient } from 'mqtt';
@@ -31,6 +33,9 @@ const commandPublishOutboxTopic = 'mqtt.command.publish';
 const commandStatusOutboxTopic = 'command.status';
 const alertStatusOutboxTopic = 'alert.status';
 const notificationInboxOutboxTopic = 'notification.inbox';
+const operationalMetrics = createOperationalMetrics(
+  'smart-house-ingestion-worker',
+);
 
 type OutboxRow = {
   id: string;
@@ -78,9 +83,12 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private outboxTimer?: NodeJS.Timeout;
   private commandOutboxTimer?: NodeJS.Timeout;
   private notificationTimer?: NodeJS.Timeout;
+  private dataDeletionTimer?: NodeJS.Timeout;
+  private operationalMetricsTimer?: NodeJS.Timeout;
   private activeOutboxRelay?: Promise<void>;
   private activeCommandOutboxRelay?: Promise<void>;
   private activeNotificationRelay?: Promise<void>;
+  private activeDataDeletionRelay?: Promise<void>;
 
   async onModuleInit(): Promise<void> {
     this.database = new Pool({ connectionString: this.config.DATABASE_URL });
@@ -94,6 +102,13 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     this.startOutboxRelay();
     this.startCommandOutboxRelay();
     this.startNotificationRelay();
+    this.startDataDeletionRelay();
+    this.operationalMetricsTimer = setInterval(
+      () => void this.measureOperationalState(),
+      10_000,
+    );
+    this.recordCertificateExpiry();
+    void this.measureOperationalState();
     this.reconciliationTimer = setInterval(
       () => void this.reconcileStatuses(),
       this.config.DEVICE_STATUS_RECONCILIATION_INTERVAL_MS,
@@ -106,12 +121,16 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     if (this.outboxTimer) clearInterval(this.outboxTimer);
     if (this.commandOutboxTimer) clearInterval(this.commandOutboxTimer);
     if (this.notificationTimer) clearInterval(this.notificationTimer);
+    if (this.dataDeletionTimer) clearInterval(this.dataDeletionTimer);
+    if (this.operationalMetricsTimer)
+      clearInterval(this.operationalMetricsTimer);
     await new Promise<void>(
       (resolve) => this.mqtt?.end(false, {}, () => resolve()) ?? resolve(),
     );
     await this.activeOutboxRelay;
     await this.activeCommandOutboxRelay;
     await this.activeNotificationRelay;
+    await this.activeDataDeletionRelay;
     await this.database?.end();
     await this.redis?.quit();
   }
@@ -170,7 +189,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       const telemetry = parseTelemetryPayload(payload);
       this.assertTopic(topic, telemetry);
-      await this.persist(
+      const persisted = await this.persist(
         normalizeTelemetry(telemetry, {
           receivedAt,
           maxFutureSkewMs:
@@ -179,7 +198,14 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
           maxPastAgeMs: this.config.TELEMETRY_MAX_PAST_AGE_SECONDS * 1_000,
         }),
       );
+      operationalMetrics.countTelemetry(persisted ? 'accepted' : 'duplicate');
+      operationalMetrics.recordIngestionLatency(
+        Math.max(0, receivedAt.getTime() - Date.parse(telemetry.occurredAt)) /
+          1_000,
+      );
     } catch (error) {
+      operationalMetrics.countTelemetry('rejected');
+      operationalMetrics.countWorkerError('telemetry');
       this.logger.warn(
         `Rejected telemetry: ${error instanceof Error ? error.message : 'unknown error'}.`,
       );
@@ -195,6 +221,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       this.assertCommandAckTopic(topic, acknowledgement);
       await this.persistCommandAck(acknowledgement);
     } catch (error) {
+      operationalMetrics.countWorkerError('command_acknowledgement');
       this.logger.warn(
         `Rejected command acknowledgement: ${error instanceof Error ? error.message : 'unknown error'}.`,
       );
@@ -319,7 +346,8 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async persist(telemetry: NormalizedTelemetry): Promise<void> {
+  private async persist(telemetry: NormalizedTelemetry): Promise<boolean> {
+    const startedAt = performance.now();
     const client = await this.databaseOrThrow().connect();
     let newlyPersisted = false;
     try {
@@ -429,9 +457,13 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
     if (!newlyPersisted) {
       this.logger.debug(`Ignored duplicate telemetry ${telemetry.messageId}.`);
-      return;
+      return false;
     }
+    operationalMetrics.recordPersistenceLatency(
+      (performance.now() - startedAt) / 1_000,
+    );
     this.logger.log(`Persisted telemetry ${telemetry.messageId}.`);
+    return true;
   }
 
   private startOutboxRelay(): void {
@@ -455,6 +487,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
     const relay = this.relayOutboxBatch()
       .catch((error: unknown) => {
+        operationalMetrics.countWorkerError('outbox');
         this.logger.error(
           'Failed to relay telemetry outbox.',
           error instanceof Error ? error.stack : undefined,
@@ -536,6 +569,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
     const relay = this.relayCommandOutboxBatch()
       .catch((error: unknown) => {
+        operationalMetrics.countWorkerError('command_outbox');
         this.logger.error(
           'Failed to relay command outbox.',
           error instanceof Error ? error.stack : undefined,
@@ -668,10 +702,16 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       [tenantId],
     );
-    const existing = await client.query<{ id: string }>(
-      'SELECT id FROM organizations WHERE mqtt_tenant_id = $1 LIMIT 1',
+    const existing = await client.query<{
+      id: string;
+      deletedAt: string | null;
+    }>(
+      'SELECT id, deleted_at AS "deletedAt" FROM organizations WHERE mqtt_tenant_id = $1 LIMIT 1',
       [tenantId],
     );
+    if (existing.rows[0]?.deletedAt) {
+      throw new Error('Telemetry was received for a deleted organization.');
+    }
     if (existing.rows[0]) return existing.rows[0].id;
     const created = await client.query<{ id: string }>(
       `INSERT INTO organizations (name, mqtt_tenant_id)
@@ -1069,15 +1109,140 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     void this.runNotificationRelay();
   }
 
+  private startDataDeletionRelay(): void {
+    this.dataDeletionTimer = setInterval(
+      () => void this.runDataDeletionRelay(),
+      this.config.NOTIFICATION_POLL_INTERVAL_MS,
+    );
+    void this.runDataDeletionRelay();
+  }
+
+  private runDataDeletionRelay(): Promise<void> {
+    if (this.activeDataDeletionRelay) return this.activeDataDeletionRelay;
+    const relay = this.processDataDeletionJob()
+      .catch((error: unknown) => {
+        operationalMetrics.countWorkerError('tenant_data_deletion');
+        this.logger.error(
+          'Failed to process tenant data deletion job.',
+          error instanceof Error ? error.stack : undefined,
+        );
+      })
+      .finally(() => {
+        if (this.activeDataDeletionRelay === relay)
+          this.activeDataDeletionRelay = undefined;
+      });
+    this.activeDataDeletionRelay = relay;
+    return relay;
+  }
+
+  private async processDataDeletionJob(): Promise<void> {
+    const client = await this.databaseOrThrow().connect();
+    let job: { id: string; organizationId: string } | undefined;
+    let inTransaction = false;
+    try {
+      await client.query('BEGIN');
+      inTransaction = true;
+      const claimed = await client.query<{
+        id: string;
+        organizationId: string;
+      }>(
+        `WITH next AS (
+           SELECT id FROM tenant_data_deletion_jobs
+           WHERE (status = 'pending' AND available_at <= now())
+              OR (status = 'processing' AND locked_at < now() - interval '5 minutes')
+           ORDER BY available_at, created_at FOR UPDATE SKIP LOCKED LIMIT 1
+         )
+         UPDATE tenant_data_deletion_jobs j
+         SET status = 'processing', attempts = attempts + 1, locked_at = now()
+         FROM next WHERE j.id = next.id
+         RETURNING j.id, j.organization_id AS "organizationId"`,
+      );
+      job = claimed.rows[0];
+      await client.query('COMMIT');
+      inTransaction = false;
+      if (!job) {
+        return;
+      }
+
+      // Persist the claim before deleting so failures consume retry attempts.
+      await client.query('BEGIN');
+      inTransaction = true;
+      // Every statement is tenant-scoped; audit and job records deliberately remain.
+      await client.query(
+        `DELETE FROM notification_deliveries WHERE job_id IN
+           (SELECT id FROM notification_jobs WHERE organization_id = $1)`,
+        [job.organizationId],
+      );
+      for (const table of [
+        'in_app_notifications',
+        'notification_jobs',
+        'outbox_events',
+        'alert_transitions',
+        'alerts',
+        'alert_rules',
+        'commands',
+        'device_activation_tokens',
+        'device_credentials',
+        'telemetry_records',
+        'devices',
+        'memberships',
+      ]) {
+        await client.query(`DELETE FROM ${table} WHERE organization_id = $1`, [
+          job.organizationId,
+        ]);
+      }
+      await client.query(
+        'UPDATE organizations SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL',
+        [job.organizationId],
+      );
+      await client.query(
+        `UPDATE tenant_data_deletion_jobs
+         SET status = 'completed', completed_at = now(), locked_at = NULL, last_error = NULL
+         WHERE id = $1 AND organization_id = $2`,
+        [job.id, job.organizationId],
+      );
+      await client.query(
+        `INSERT INTO audit_events (organization_id, actor_id, action, resource_type, resource_id, result, correlation_id, metadata)
+         SELECT j.organization_id, j.requested_by, 'organization.data_deletion.complete',
+                'tenant_data_deletion_job', j.id::text, 'allowed', j.id,
+                jsonb_build_object('scope', 'all_tenant_operational_data', 'attempts', j.attempts)
+         FROM tenant_data_deletion_jobs j WHERE j.id = $1 AND j.organization_id = $2`,
+        [job.id, job.organizationId],
+      );
+      await client.query('COMMIT');
+      inTransaction = false;
+    } catch (error) {
+      if (inTransaction) await client.query('ROLLBACK');
+      if (job) {
+        const message =
+          error instanceof Error ? error.message : 'unknown deletion failure';
+        await this.databaseOrThrow().query(
+          `UPDATE tenant_data_deletion_jobs
+           SET status = CASE WHEN attempts >= max_attempts THEN 'dead_letter' ELSE 'pending' END,
+               available_at = CASE WHEN attempts >= max_attempts THEN available_at
+                 ELSE now() + (LEAST(3600, power(2, attempts) * 5) * interval '1 second') END,
+               locked_at = NULL, last_error = $2,
+               dead_lettered_at = CASE WHEN attempts >= max_attempts THEN now() ELSE NULL END
+           WHERE id = $1`,
+          [job.id, message],
+        );
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private runNotificationRelay(): Promise<void> {
     if (this.activeNotificationRelay) return this.activeNotificationRelay;
     const relay = this.relayNotificationBatch()
-      .catch((error: unknown) =>
+      .catch((error: unknown) => {
+        operationalMetrics.countWorkerError('notifications');
         this.logger.error(
           'Failed to relay notification jobs.',
           error instanceof Error ? error.stack : undefined,
-        ),
-      )
+        );
+      })
       .finally(() => {
         if (this.activeNotificationRelay === relay)
           this.activeNotificationRelay = undefined;
@@ -1101,18 +1266,23 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
            WHERE id = $1`,
           [job.id],
         );
+        operationalMetrics.countNotification('completed');
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'unknown delivery failure';
-        await this.databaseOrThrow().query(
+        const result = await this.databaseOrThrow().query<{ status: string }>(
           `UPDATE notification_jobs
            SET status = CASE WHEN attempts >= max_attempts THEN 'dead_letter' ELSE 'pending' END,
                available_at = CASE WHEN attempts >= max_attempts THEN available_at
                  ELSE now() + (LEAST(3600, power(2, attempts) * 5) * interval '1 second') END,
                locked_at = NULL, last_error = $2,
                dead_lettered_at = CASE WHEN attempts >= max_attempts THEN now() ELSE NULL END
-           WHERE id = $1`,
+           WHERE id = $1
+           RETURNING status`,
           [job.id, message],
+        );
+        operationalMetrics.countNotification(
+          result.rows[0]?.status === 'dead_letter' ? 'dead_letter' : 'retry',
         );
       }
     }
@@ -1265,6 +1435,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
         `UPDATE notification_deliveries SET status = 'sent', sent_at = now(), last_error = NULL WHERE id = $1`,
         [delivery.rows[0].id],
       );
+      operationalMetrics.countNotification('email_sent');
     } catch (error) {
       await this.databaseOrThrow().query(
         `UPDATE notification_deliveries SET status = 'failed', last_error = $2 WHERE id = $1`,
@@ -1290,5 +1461,56 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private mqttOrThrow(): MqttClient {
     if (!this.mqtt) throw new Error('MQTT is not initialized.');
     return this.mqtt;
+  }
+
+  private async measureOperationalState(): Promise<void> {
+    try {
+      const result = await this.databaseOrThrow().query<{
+        outbox: string;
+        commands: string;
+        notifications: string;
+      }>(
+        `SELECT
+           count(*) FILTER (WHERE topic <> $1 AND processed_at IS NULL)::text AS outbox,
+           count(*) FILTER (WHERE topic = $1 AND processed_at IS NULL)::text AS commands,
+           (SELECT count(*) FROM notification_jobs WHERE status IN ('pending', 'processing'))::text AS notifications
+         FROM outbox_events`,
+        [commandPublishOutboxTopic],
+      );
+      const state = result.rows[0];
+      if (!state) return;
+      operationalMetrics.setBacklog('outbox', Number(state.outbox));
+      operationalMetrics.setBacklog('commands', Number(state.commands));
+      operationalMetrics.setBacklog(
+        'notifications',
+        Number(state.notifications),
+      );
+    } catch (error) {
+      operationalMetrics.countWorkerError('backlog_measurement');
+      this.logger.error(
+        'Failed to measure operational backlogs.',
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+  }
+
+  private recordCertificateExpiry(): void {
+    for (const [certificate, path] of [
+      ['worker', this.config.MQTT_CERT_FILE],
+      ['ca', this.config.MQTT_CA_FILE],
+    ] as const) {
+      try {
+        const expiry = new X509Certificate(readFileSync(path)).validTo;
+        operationalMetrics.setCertificateExpiry(
+          certificate,
+          Math.max(0, (Date.parse(expiry) - Date.now()) / 1_000),
+        );
+      } catch (error) {
+        operationalMetrics.countWorkerError('certificate_expiry');
+        this.logger.warn(
+          `Unable to read ${certificate} certificate expiry: ${error instanceof Error ? error.message : 'unknown error'}.`,
+        );
+      }
+    }
   }
 }

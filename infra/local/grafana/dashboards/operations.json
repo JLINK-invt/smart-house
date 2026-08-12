@@ -1,0 +1,58 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [{ "expr": "sum by (outcome) (rate(smart_house_telemetry_messages_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A" }],
+      "title": "Telemetry outcomes / second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(smart_house_telemetry_ingestion_latency_seconds_bucket[5m])))", "legendFormat": "p95 ingestion", "refId": "A" }, { "expr": "histogram_quantile(0.95, sum by (le) (rate(smart_house_telemetry_persistence_latency_seconds_bucket[5m])))", "legendFormat": "p95 persistence", "refId": "B" }],
+      "title": "Telemetry latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [{ "expr": "smart_house_backlog", "legendFormat": "{{queue}}", "refId": "A" }],
+      "title": "Pending work",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "targets": [{ "expr": "smart_house_certificate_expiry_seconds", "legendFormat": "{{certificate}}", "refId": "A" }],
+      "title": "MQTT certificate time remaining",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "id": 5,
+      "targets": [{ "expr": "sum by (outcome) (rate(smart_house_notifications_total[5m]))", "legendFormat": "notification {{outcome}}", "refId": "A" }, { "expr": "sum by (component) (rate(smart_house_worker_errors_total[5m]))", "legendFormat": "error {{component}}", "refId": "B" }],
+      "title": "Notification outcomes and worker errors / second",
+      "type": "timeseries"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["operations"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Smart House Operations",
+  "uid": "smart-house-operations",
+  "version": 1
+}
