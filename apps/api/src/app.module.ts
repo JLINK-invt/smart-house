@@ -5,6 +5,7 @@ import { IdentityModule } from './identity/identity.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { SpikeModule } from './spike/spike.module';
 import { AlertsModule } from './alerts/alerts.module';
+import { DataDeletionModule } from './data-deletion/data-deletion.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { AlertsModule } from './alerts/alerts.module';
     OrganizationsModule,
     DevicesModule,
     AlertsModule,
+    DataDeletionModule,
     SpikeModule,
   ],
 })

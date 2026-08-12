@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: timescale/timescaledb:2.17.2-pg17@sha256:3324f81ca7f84cdc2dc4497863b3798ababa8ce130c5b59d73f0b40e3a34148e
+    image: timescale/timescaledb:2.29.0-pg17@sha256:450a61b5b6f957696a3631dec556d27760aaba824bed12b5c29677136feed95c
     command: postgres -c shared_preload_libraries=timescaledb
     environment:
       POSTGRES_DB: smart_house

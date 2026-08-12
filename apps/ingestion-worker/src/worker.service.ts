@@ -83,10 +83,12 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private outboxTimer?: NodeJS.Timeout;
   private commandOutboxTimer?: NodeJS.Timeout;
   private notificationTimer?: NodeJS.Timeout;
+  private dataDeletionTimer?: NodeJS.Timeout;
   private operationalMetricsTimer?: NodeJS.Timeout;
   private activeOutboxRelay?: Promise<void>;
   private activeCommandOutboxRelay?: Promise<void>;
   private activeNotificationRelay?: Promise<void>;
+  private activeDataDeletionRelay?: Promise<void>;
 
   async onModuleInit(): Promise<void> {
     this.database = new Pool({ connectionString: this.config.DATABASE_URL });
@@ -100,6 +102,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     this.startOutboxRelay();
     this.startCommandOutboxRelay();
     this.startNotificationRelay();
+    this.startDataDeletionRelay();
     this.operationalMetricsTimer = setInterval(
       () => void this.measureOperationalState(),
       10_000,
@@ -118,6 +121,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     if (this.outboxTimer) clearInterval(this.outboxTimer);
     if (this.commandOutboxTimer) clearInterval(this.commandOutboxTimer);
     if (this.notificationTimer) clearInterval(this.notificationTimer);
+    if (this.dataDeletionTimer) clearInterval(this.dataDeletionTimer);
     if (this.operationalMetricsTimer)
       clearInterval(this.operationalMetricsTimer);
     await new Promise<void>(
@@ -126,6 +130,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     await this.activeOutboxRelay;
     await this.activeCommandOutboxRelay;
     await this.activeNotificationRelay;
+    await this.activeDataDeletionRelay;
     await this.database?.end();
     await this.redis?.quit();
   }
@@ -697,10 +702,16 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       [tenantId],
     );
-    const existing = await client.query<{ id: string }>(
-      'SELECT id FROM organizations WHERE mqtt_tenant_id = $1 LIMIT 1',
+    const existing = await client.query<{
+      id: string;
+      deletedAt: string | null;
+    }>(
+      'SELECT id, deleted_at AS "deletedAt" FROM organizations WHERE mqtt_tenant_id = $1 LIMIT 1',
       [tenantId],
     );
+    if (existing.rows[0]?.deletedAt) {
+      throw new Error('Telemetry was received for a deleted organization.');
+    }
     if (existing.rows[0]) return existing.rows[0].id;
     const created = await client.query<{ id: string }>(
       `INSERT INTO organizations (name, mqtt_tenant_id)
@@ -1096,6 +1107,130 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       this.config.NOTIFICATION_POLL_INTERVAL_MS,
     );
     void this.runNotificationRelay();
+  }
+
+  private startDataDeletionRelay(): void {
+    this.dataDeletionTimer = setInterval(
+      () => void this.runDataDeletionRelay(),
+      this.config.NOTIFICATION_POLL_INTERVAL_MS,
+    );
+    void this.runDataDeletionRelay();
+  }
+
+  private runDataDeletionRelay(): Promise<void> {
+    if (this.activeDataDeletionRelay) return this.activeDataDeletionRelay;
+    const relay = this.processDataDeletionJob()
+      .catch((error: unknown) => {
+        operationalMetrics.countWorkerError('tenant_data_deletion');
+        this.logger.error(
+          'Failed to process tenant data deletion job.',
+          error instanceof Error ? error.stack : undefined,
+        );
+      })
+      .finally(() => {
+        if (this.activeDataDeletionRelay === relay)
+          this.activeDataDeletionRelay = undefined;
+      });
+    this.activeDataDeletionRelay = relay;
+    return relay;
+  }
+
+  private async processDataDeletionJob(): Promise<void> {
+    const client = await this.databaseOrThrow().connect();
+    let job: { id: string; organizationId: string } | undefined;
+    let inTransaction = false;
+    try {
+      await client.query('BEGIN');
+      inTransaction = true;
+      const claimed = await client.query<{
+        id: string;
+        organizationId: string;
+      }>(
+        `WITH next AS (
+           SELECT id FROM tenant_data_deletion_jobs
+           WHERE (status = 'pending' AND available_at <= now())
+              OR (status = 'processing' AND locked_at < now() - interval '5 minutes')
+           ORDER BY available_at, created_at FOR UPDATE SKIP LOCKED LIMIT 1
+         )
+         UPDATE tenant_data_deletion_jobs j
+         SET status = 'processing', attempts = attempts + 1, locked_at = now()
+         FROM next WHERE j.id = next.id
+         RETURNING j.id, j.organization_id AS "organizationId"`,
+      );
+      job = claimed.rows[0];
+      await client.query('COMMIT');
+      inTransaction = false;
+      if (!job) {
+        return;
+      }
+
+      // Persist the claim before deleting so failures consume retry attempts.
+      await client.query('BEGIN');
+      inTransaction = true;
+      // Every statement is tenant-scoped; audit and job records deliberately remain.
+      await client.query(
+        `DELETE FROM notification_deliveries WHERE job_id IN
+           (SELECT id FROM notification_jobs WHERE organization_id = $1)`,
+        [job.organizationId],
+      );
+      for (const table of [
+        'in_app_notifications',
+        'notification_jobs',
+        'outbox_events',
+        'alert_transitions',
+        'alerts',
+        'alert_rules',
+        'commands',
+        'device_activation_tokens',
+        'device_credentials',
+        'telemetry_records',
+        'devices',
+        'memberships',
+      ]) {
+        await client.query(`DELETE FROM ${table} WHERE organization_id = $1`, [
+          job.organizationId,
+        ]);
+      }
+      await client.query(
+        'UPDATE organizations SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL',
+        [job.organizationId],
+      );
+      await client.query(
+        `UPDATE tenant_data_deletion_jobs
+         SET status = 'completed', completed_at = now(), locked_at = NULL, last_error = NULL
+         WHERE id = $1 AND organization_id = $2`,
+        [job.id, job.organizationId],
+      );
+      await client.query(
+        `INSERT INTO audit_events (organization_id, actor_id, action, resource_type, resource_id, result, correlation_id, metadata)
+         SELECT j.organization_id, j.requested_by, 'organization.data_deletion.complete',
+                'tenant_data_deletion_job', j.id::text, 'allowed', j.id,
+                jsonb_build_object('scope', 'all_tenant_operational_data', 'attempts', j.attempts)
+         FROM tenant_data_deletion_jobs j WHERE j.id = $1 AND j.organization_id = $2`,
+        [job.id, job.organizationId],
+      );
+      await client.query('COMMIT');
+      inTransaction = false;
+    } catch (error) {
+      if (inTransaction) await client.query('ROLLBACK');
+      if (job) {
+        const message =
+          error instanceof Error ? error.message : 'unknown deletion failure';
+        await this.databaseOrThrow().query(
+          `UPDATE tenant_data_deletion_jobs
+           SET status = CASE WHEN attempts >= max_attempts THEN 'dead_letter' ELSE 'pending' END,
+               available_at = CASE WHEN attempts >= max_attempts THEN available_at
+                 ELSE now() + (LEAST(3600, power(2, attempts) * 5) * interval '1 second') END,
+               locked_at = NULL, last_error = $2,
+               dead_lettered_at = CASE WHEN attempts >= max_attempts THEN now() ELSE NULL END
+           WHERE id = $1`,
+          [job.id, message],
+        );
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private runNotificationRelay(): Promise<void> {
