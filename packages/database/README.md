@@ -56,3 +56,8 @@ All job reads and destructive statements are scoped by `organization_id`; audit
 events and the job record are retained, while membership is removed and the
 organization is marked deleted to prevent later MQTT or API access from
 recreating data.
+
+`0019_active_alert_incidents.sql` treats open, acknowledged, and silenced
+alerts as one active incident per rule and device. Existing duplicate active
+rows are resolved before the wider unique index is installed, and automatic
+recoveries may record a transition without a human actor.

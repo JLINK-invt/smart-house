@@ -217,15 +217,21 @@ export class AlertsService implements OnModuleDestroy {
     const eventId = crypto.randomUUID();
     const target = actionStates[action];
     const result = await this.database.query<Alert>(
-      `WITH updated AS (
-         UPDATE alerts
-         SET state = $4,
-             resolved_at = CASE WHEN $4 = 'resolved' THEN now() ELSE resolved_at END
-         WHERE id = $2 AND organization_id = $1 AND state = ANY($5::text[])
-         RETURNING id, rule_id AS "ruleId", device_id AS "deviceId", metric,
-                   observed_value AS "observedValue", observed_at AS "observedAt",
-                   message, severity, state, opened_at AS "openedAt",
-                   resolved_at AS "resolvedAt", ($5::text[])[1] AS "fromState"
+      `WITH candidate AS (
+          SELECT id, state AS "fromState"
+          FROM alerts
+          WHERE id = $2 AND organization_id = $1 AND state = ANY($5::text[])
+          FOR UPDATE
+        ), updated AS (
+          UPDATE alerts a
+          SET state = $4,
+              resolved_at = CASE WHEN $4 = 'resolved' THEN now() ELSE resolved_at END
+          FROM candidate c
+          WHERE a.id = c.id
+          RETURNING a.id, a.rule_id AS "ruleId", a.device_id AS "deviceId", a.metric,
+                    a.observed_value AS "observedValue", a.observed_at AS "observedAt",
+                    a.message, a.severity, a.state, a.opened_at AS "openedAt",
+                    a.resolved_at AS "resolvedAt", c."fromState"
        ), actor AS (
          SELECT id FROM users WHERE subject = $3
        ), transition AS (

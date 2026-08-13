@@ -718,58 +718,119 @@ describe('WorkerService', () => {
     );
   });
 
-  it('uses hysteresis to retain an open incident until the recovery threshold is crossed', async () => {
-    const rule = {
-      id: 'rule-1',
-      name: 'High temperature',
-      metric: 'temperature',
-      operator: 'gt',
-      threshold: 30,
-      severity: 'high',
-      durationSeconds: 0,
-      hysteresis: 2,
-      cooldownSeconds: 0,
-      conditionStartedAt: '2026-01-01T00:00:00.000Z',
-    };
-    const query = jest.fn((statement: string) => {
-      if (statement.includes('FROM alert_rules')) return { rows: [rule] };
-      if (statement.includes('SELECT id FROM alerts'))
-        return { rows: [{ id: 'alert-1' }] };
-      return { rows: [], rowCount: 1 };
-    });
-    const service = new WorkerService();
-    const evaluate = (value: number) =>
-      (
-        service as unknown as {
-          evaluateThresholdAlerts: (
-            client: { query: jest.Mock },
-            organizationId: string,
-            deviceId: string,
-            metric: string,
-            value: number,
-            time: string,
-          ) => Promise<void>;
+  it.each(['acknowledged', 'silenced'] as const)(
+    'retains and recovers one %s incident across the hysteresis boundary',
+    async (activeState) => {
+      const rule = {
+        id: 'rule-1',
+        name: 'High temperature',
+        metric: 'temperature',
+        operator: 'gt',
+        threshold: 30,
+        severity: 'high',
+        durationSeconds: 0,
+        hysteresis: 2,
+        cooldownSeconds: 0,
+        conditionStartedAt: '2026-01-01T00:00:00.000Z',
+      };
+      const activeAlert = {
+        id: 'alert-1',
+        ruleId: 'rule-1',
+        deviceId: 'device-1',
+        metric: 'temperature',
+        observedValue: 31,
+        observedAt: '2026-01-01T00:00:00.000Z',
+        message: 'High temperature',
+        severity: 'high',
+        state: activeState,
+        openedAt: '2026-01-01T00:00:00.000Z',
+        resolvedAt: null,
+      };
+      const query = jest.fn((statement: string, _parameters?: unknown[]) => {
+        void _parameters;
+        if (statement.includes('FROM alert_rules')) return { rows: [rule] };
+        if (
+          statement.includes('FROM alerts') &&
+          statement.includes('FOR UPDATE')
+        ) {
+          return { rows: [activeAlert] };
         }
-      ).evaluateThresholdAlerts(
-        { query },
-        'organization-1',
-        'device-1',
-        'temperature',
-        value,
-        '2026-01-01T00:01:00.000Z',
-      );
+        if (statement.includes("UPDATE alerts SET state = 'resolved'")) {
+          return {
+            rows: [
+              {
+                ...activeAlert,
+                state: 'resolved',
+                resolvedAt: '2026-01-01T00:01:00.000Z',
+              },
+            ],
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      });
+      const service = new WorkerService();
+      const evaluate = (value: number) =>
+        (
+          service as unknown as {
+            evaluateThresholdAlerts: (
+              client: { query: jest.Mock },
+              organizationId: string,
+              deviceId: string,
+              metric: string,
+              value: number,
+              time: string,
+            ) => Promise<void>;
+          }
+        ).evaluateThresholdAlerts(
+          { query },
+          'organization-1',
+          'device-1',
+          'temperature',
+          value,
+          '2026-01-01T00:01:00.000Z',
+        );
 
-    await evaluate(29);
-    expect(
-      query.mock.calls.some(([sql]) => sql.includes("SET state = 'resolved'")),
-    ).toBe(false);
-    query.mockClear();
-    await evaluate(28);
-    expect(query).toHaveBeenCalledWith(
-      expect.stringContaining("SET state = 'resolved'"),
-      ['organization-1', 'rule-1', 'device-1', '2026-01-01T00:01:00.000Z'],
-    );
-  });
+      await evaluate(29);
+      expect(
+        query.mock.calls.some(([sql]) =>
+          sql.includes("SET state = 'resolved'"),
+        ),
+      ).toBe(false);
+      expect(
+        query.mock.calls.some(([sql]) => sql.includes('INSERT INTO alerts')),
+      ).toBe(false);
+      query.mockClear();
+      await evaluate(28);
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining("SET state = 'resolved'"),
+        ['organization-1', 'rule-1', 'device-1', '2026-01-01T00:01:00.000Z'],
+      );
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO alert_transitions'),
+        ['alert-1', 'organization-1', activeState],
+      );
+      const outboxCall = query.mock.calls.find(([statement]) =>
+        statement.includes('INSERT INTO outbox_events'),
+      );
+      expect(outboxCall).toBeDefined();
+      const outboxParameters = outboxCall?.[1] as unknown as [
+        string,
+        string,
+        string,
+        Record<string, unknown>,
+      ];
+      expect(outboxParameters[1]).toBe('organization-1');
+      expect(outboxParameters[2]).toBe('alert.status');
+      expect(outboxParameters[3]).toMatchObject({
+        organizationId: 'organization-1',
+        alert: { id: 'alert-1', state: 'resolved' },
+      });
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO notification_jobs'),
+        ['organization-1', 'alert-1', 'resolved'],
+      );
+    },
+  );
 
   it('applies cooldown when opening a new incident for a resolved rule', async () => {
     const query = jest.fn((statement: string) => {
@@ -1140,7 +1201,7 @@ describe('WorkerService', () => {
     );
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining(
-        "ON CONFLICT (rule_id, device_id) WHERE state = 'open'",
+        "WHERE state IN ('open', 'acknowledged', 'silenced')",
       ),
       ['organization-1', 'device-1'],
     );
@@ -1151,12 +1212,35 @@ describe('WorkerService', () => {
     ).toHaveLength(1);
   });
 
-  it('resolves open offline alerts when a device reconnects', async () => {
+  it('resolves an acknowledged offline alert and publishes its recovery', async () => {
+    const recovered = {
+      id: 'alert-1',
+      ruleId: 'rule-1',
+      deviceId: 'device-1',
+      metric: 'device_status',
+      observedValue: 0,
+      observedAt: '2026-01-01T00:00:00.000Z',
+      message: 'Device is offline',
+      severity: 'high',
+      state: 'resolved',
+      openedAt: '2026-01-01T00:00:00.000Z',
+      resolvedAt: '2026-01-01T00:02:00.000Z',
+      fromState: 'acknowledged',
+    };
     const query = jest.fn((statement: string) => {
       if (statement.includes('WITH previous AS')) {
         return { rows: [{ previousStatus: 'offline', status: 'online' }] };
       }
-      if (statement.includes("SET state = 'resolved'")) return { rows: [] };
+      if (statement.includes("SET state = 'resolved'")) {
+        return { rows: [recovered] };
+      }
+      if (
+        statement.includes('INSERT INTO alert_transitions') ||
+        statement.includes('INSERT INTO outbox_events') ||
+        statement.includes('INSERT INTO notification_jobs')
+      ) {
+        return { rows: [], rowCount: 1 };
+      }
       throw new Error(`Unexpected query: ${statement}`);
     });
     const service = new WorkerService();
@@ -1180,6 +1264,14 @@ describe('WorkerService', () => {
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining("r.rule_type = 'device_offline'"),
       ['organization-1', 'device-1', '2026-01-01T00:02:00.000Z'],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO alert_transitions'),
+      ['alert-1', 'organization-1', 'acknowledged'],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO notification_jobs'),
+      ['organization-1', 'alert-1', 'resolved'],
     );
   });
 
@@ -1206,7 +1298,7 @@ describe('WorkerService', () => {
       "a.resolved_at > now() - (r.cooldown_seconds * interval '1 second')",
     );
     expect(statement).toContain(
-      "ON CONFLICT (rule_id, device_id) WHERE state = 'open' DO NOTHING",
+      "WHERE state IN ('open', 'acknowledged', 'silenced') DO NOTHING",
     );
     expect(parameters).toEqual(['organization-1', 'device-1']);
   });

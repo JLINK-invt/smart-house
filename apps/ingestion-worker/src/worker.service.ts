@@ -8,6 +8,7 @@ import { createOperationalMetrics } from '@smart-house/observability';
 import {
   parseCommandAckPayload,
   parseTelemetryPayload,
+  type AlertStatusEvent,
   type CommandAck,
   relayCommandSchema,
   type CommandStatusEvent,
@@ -70,6 +71,10 @@ type ThresholdRule = {
   hysteresis: number;
   cooldownSeconds: number;
   conditionStartedAt: string | null;
+};
+
+type AlertStatusRow = AlertStatusEvent['alert'] & {
+  fromState?: 'open' | 'acknowledged' | 'silenced';
 };
 
 @Injectable()
@@ -831,22 +836,40 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     );
 
     for (const rule of rules.rows) {
-      const open = await client.query<{ id: string }>(
-        `SELECT id FROM alerts
+      const active = await client.query<AlertStatusRow>(
+        `SELECT id, rule_id AS "ruleId", device_id AS "deviceId", metric,
+                observed_value AS "observedValue", observed_at AS "observedAt",
+                message, severity, state, opened_at AS "openedAt",
+                resolved_at AS "resolvedAt"
+         FROM alerts
          WHERE organization_id = $1 AND rule_id = $2 AND device_id = $3
-           AND state = 'open'
+            AND state IN ('open', 'acknowledged', 'silenced')
          FOR UPDATE`,
         [organizationId, rule.id, deviceId],
       );
 
-      if (open.rows[0]) {
+      if (active.rows[0]) {
         if (!this.hasRecovered(rule, observedValue)) continue;
-        await client.query(
+        const recovered = await client.query<AlertStatusRow>(
           `UPDATE alerts SET state = 'resolved', resolved_at = $4::timestamptz
            WHERE organization_id = $1 AND rule_id = $2 AND device_id = $3
-             AND state = 'open' AND opened_at <= $4::timestamptz`,
+              AND state IN ('open', 'acknowledged', 'silenced')
+              AND opened_at <= $4::timestamptz
+           RETURNING id, rule_id AS "ruleId", device_id AS "deviceId", metric,
+                     observed_value AS "observedValue", observed_at AS "observedAt",
+                     message, severity, state, opened_at AS "openedAt",
+                     resolved_at AS "resolvedAt"`,
           [organizationId, rule.id, deviceId, observedAt],
         );
+        if (recovered.rows[0]) {
+          recovered.rows[0].fromState = active.rows[0].state as
+            'open' | 'acknowledged' | 'silenced';
+          await this.recordAutomaticRecovery(
+            client,
+            organizationId,
+            recovered.rows[0],
+          );
+        }
         await client.query(
           `UPDATE alert_rules SET condition_started_at = NULL
            WHERE id = $1 AND organization_id = $2
@@ -881,7 +904,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
 
-      const openedAlert = await client.query<{ id: string }>(
+      const openedAlert = await client.query<AlertStatusRow>(
         `INSERT INTO alerts
            (organization_id, device_id, rule_id, severity, metric, observed_value,
             observed_at, message, opened_at)
@@ -899,17 +922,27 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
                AND a.resolved_at > $5::timestamptz -
                  (r.cooldown_seconds * interval '1 second')
            )
-          ON CONFLICT (rule_id, device_id) WHERE state = 'open' DO NOTHING
-          RETURNING id`,
+           ON CONFLICT (rule_id, device_id)
+             WHERE state IN ('open', 'acknowledged', 'silenced') DO NOTHING
+           RETURNING id, rule_id AS "ruleId", device_id AS "deviceId", metric,
+                     observed_value AS "observedValue", observed_at AS "observedAt",
+                     message, severity, state, opened_at AS "openedAt",
+                     resolved_at AS "resolvedAt"`,
         [rule.id, organizationId, deviceId, observedValue, observedAt],
       );
-      if (openedAlert.rows[0])
+      if (openedAlert.rows[0]) {
+        await this.enqueueAlertStatus(
+          client,
+          organizationId,
+          openedAlert.rows[0],
+        );
         await this.enqueueAlertNotification(
           client,
           organizationId,
           openedAlert.rows[0].id,
           'open',
         );
+      }
     }
   }
 
@@ -918,7 +951,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     organizationId: string,
     deviceId: string,
   ): Promise<void> {
-    const openedAlerts = await client.query<{ id: string }>(
+    const openedAlerts = await client.query<AlertStatusRow>(
       `INSERT INTO alerts
          (organization_id, device_id, rule_id, severity, metric, observed_value,
           observed_at, message, opened_at)
@@ -933,17 +966,23 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
              AND a.state = 'resolved'
              AND a.resolved_at > now() - (r.cooldown_seconds * interval '1 second')
          )
-       ON CONFLICT (rule_id, device_id) WHERE state = 'open' DO NOTHING
-        RETURNING id`,
+       ON CONFLICT (rule_id, device_id)
+         WHERE state IN ('open', 'acknowledged', 'silenced') DO NOTHING
+         RETURNING id, rule_id AS "ruleId", device_id AS "deviceId", metric,
+                   observed_value AS "observedValue", observed_at AS "observedAt",
+                   message, severity, state, opened_at AS "openedAt",
+                   resolved_at AS "resolvedAt"`,
       [organizationId, deviceId],
     );
-    for (const alert of openedAlerts.rows)
+    for (const alert of openedAlerts.rows) {
+      await this.enqueueAlertStatus(client, organizationId, alert);
       await this.enqueueAlertNotification(
         client,
         organizationId,
         alert.id,
         'open',
       );
+    }
   }
 
   private async enqueueAlertNotification(
@@ -970,14 +1009,83 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     deviceId: string,
     resolvedAt: string,
   ): Promise<void> {
-    await client.query(
-      `UPDATE alerts a SET state = 'resolved', resolved_at = $3::timestamptz
-       FROM alert_rules r
-       WHERE a.organization_id = $1 AND a.device_id = $2 AND a.state = 'open'
-         AND a.rule_id = r.id AND r.organization_id = $1
-         AND r.rule_type = 'device_offline'
-         AND a.opened_at <= $3::timestamptz`,
+    const recovered = await client.query<AlertStatusRow>(
+      `WITH active AS (
+         SELECT a.id, a.state AS "fromState"
+         FROM alerts a JOIN alert_rules r ON r.id = a.rule_id
+         WHERE a.organization_id = $1 AND a.device_id = $2
+           AND a.state IN ('open', 'acknowledged', 'silenced')
+           AND r.organization_id = $1 AND r.rule_type = 'device_offline'
+           AND a.opened_at <= $3::timestamptz
+         FOR UPDATE OF a
+       )
+       UPDATE alerts a SET state = 'resolved', resolved_at = $3::timestamptz
+       FROM active
+       WHERE a.id = active.id
+       RETURNING a.id, a.rule_id AS "ruleId", a.device_id AS "deviceId", a.metric,
+                 a.observed_value AS "observedValue", a.observed_at AS "observedAt",
+                 a.message, a.severity, a.state, a.opened_at AS "openedAt",
+                 a.resolved_at AS "resolvedAt", active."fromState"`,
       [organizationId, deviceId, resolvedAt],
+    );
+    for (const alert of recovered.rows) {
+      await this.recordAutomaticRecovery(client, organizationId, alert);
+    }
+  }
+
+  private async recordAutomaticRecovery(
+    client: PoolClient,
+    organizationId: string,
+    alert: AlertStatusRow,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO alert_transitions
+         (alert_id, organization_id, actor_id, from_state, to_state)
+       VALUES ($1, $2, NULL, $3, 'resolved')`,
+      [alert.id, organizationId, alert.fromState],
+    );
+    await this.enqueueAlertStatus(client, organizationId, alert);
+    await this.enqueueAlertNotification(
+      client,
+      organizationId,
+      alert.id,
+      'resolved',
+    );
+  }
+
+  private async enqueueAlertStatus(
+    client: PoolClient,
+    organizationId: string,
+    alert: AlertStatusRow,
+  ): Promise<void> {
+    const eventId = crypto.randomUUID();
+    await client.query(
+      `INSERT INTO outbox_events (id, organization_id, topic, payload)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        eventId,
+        organizationId,
+        alertStatusOutboxTopic,
+        {
+          eventId,
+          correlationId: alert.id,
+          organizationId,
+          deviceId: alert.deviceId,
+          alert: {
+            id: alert.id,
+            ruleId: alert.ruleId,
+            deviceId: alert.deviceId,
+            metric: alert.metric,
+            observedValue: alert.observedValue,
+            observedAt: alert.observedAt,
+            message: alert.message,
+            severity: alert.severity,
+            state: alert.state,
+            openedAt: alert.openedAt,
+            resolvedAt: alert.resolvedAt,
+          },
+        } satisfies AlertStatusEvent,
+      ],
     );
   }
 

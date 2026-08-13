@@ -135,7 +135,7 @@ describe('AlertsService', () => {
       ),
     ).resolves.toMatchObject({ id: 'alert-1', state: 'acknowledged' });
     expect(query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO alert_transitions'),
+      expect.stringContaining('state AS "fromState"'),
       expect.arrayContaining([
         'organization-1',
         'alert-1',
